@@ -23,10 +23,10 @@ let nextId = 1;
 const uid = () => String(nextId++);
 
 const ASPECTS = {
-  '16:9': [1280, 720],
-  '9:16': [720, 1280],
+  '16:9': [1920, 1080],
+  '9:16': [1080, 1920],
   '1:1':  [1080, 1080],
-  '4:3':  [1280, 960],
+  '4:3':  [1440, 1080],
 };
 
 // ---------- DOM ----------
@@ -160,6 +160,7 @@ $('#modal-apply').onclick = () => {
   const activeTab = document.querySelector('.tab.active').dataset.tab;
   const perLine = parseFloat($('#script-per-line').value) || 3;
   const replace = $('#script-replace-clips').checked;
+  const proportional = $('#script-proportional').checked;
   let lines = [];
   if (activeTab === 'paste') {
     let text = $('#script-text').value;
@@ -172,7 +173,7 @@ $('#modal-apply').onclick = () => {
     lines = tableLines.slice();
   }
   if (lines.length === 0) { alert('没有可用的文案行'); return; }
-  applyLines(lines, perLine, replace);
+  applyLines(lines, perLine, replace, proportional);
   $('#modal').classList.add('hidden');
 };
 
@@ -274,26 +275,49 @@ function parseDelimited(text, sep) {
   return rows;
 }
 
-function applyLines(lines, perLine, redistributeClips) {
+function applyLines(lines, perLine, redistributeClips, proportional = true) {
   const total = state.audio?.duration || (lines.length * perLine);
-  const seg = total / lines.length;
-  state.subtitles = lines.map((t, i) => ({
-    id: uid(),
-    text: t,
-    start: i * seg,
-    end: Math.max(i * seg + 0.1, (i + 1) * seg - 0.05),
-  }));
-  if (redistributeClips && state.clips.length > 0) {
-    const n = state.clips.length;
-    if (n === lines.length) {
-      // Perfect 1:1 — each clip aligns to one subtitle
-      state.clips.forEach((c, i) => { c.duration = seg; });
-    } else {
-      const each = total / n;
-      state.clips.forEach(c => { c.duration = each; });
+  let durations;
+  if (proportional) {
+    const weights = lines.map(l => Math.max(1, l.length));
+    const sumW = weights.reduce((a, b) => a + b, 0);
+    durations = weights.map(w => total * w / sumW);
+  } else {
+    durations = lines.map(() => total / lines.length);
+  }
+  let acc = 0;
+  state.subtitles = lines.map((t, i) => {
+    const sub = {
+      id: uid(), text: t,
+      start: acc,
+      end: Math.max(acc + 0.15, acc + durations[i] - 0.05),
+    };
+    acc += durations[i];
+    return sub;
+  });
+  if (redistributeClips && state.clips.length > 0) alignClipsToSubtitles();
+  rebuild();
+}
+
+function alignClipsToSubtitles() {
+  if (state.clips.length === 0 || state.subtitles.length === 0) return;
+  const n = state.clips.length, m = state.subtitles.length;
+  if (n === m) {
+    // 1:1 — each image flips when its subtitle appears
+    state.clips.forEach((c, i) => {
+      const s = state.subtitles[i];
+      c.duration = Math.max(0.2, s.end - s.start + 0.05);
+    });
+  } else {
+    // Group subtitles per image proportionally by index
+    for (let i = 0; i < n; i++) {
+      const a = Math.floor(i * m / n);
+      const b = Math.floor((i + 1) * m / n);
+      const start = state.subtitles[a].start;
+      const end = b >= m ? state.subtitles[m - 1].end : state.subtitles[b].start;
+      state.clips[i].duration = Math.max(0.2, end - start);
     }
   }
-  rebuild();
 }
 
 // ---------- Save / Load ----------
@@ -350,7 +374,7 @@ function loadProject(file) {
 }
 
 // ---------- Render ----------
-function drawClipPan(img, panType, progress) {
+function drawClipPan(img, panType, progress, target = ctx) {
   const W = canvas.width, H = canvas.height;
   const ir = img.width / img.height;
   const cr = W / H;
@@ -358,7 +382,7 @@ function drawClipPan(img, panType, progress) {
   if (ir > cr) { baseH = H; baseW = H * ir; }
   else { baseW = W; baseH = W / ir; }
 
-  const overscan = 1.18;
+  const overscan = 1.10;
   let dw = baseW * overscan, dh = baseH * overscan;
   let dx = (W - dw) / 2, dy = (H - dh) / 2;
 
@@ -369,13 +393,13 @@ function drawClipPan(img, panType, progress) {
     case 'up':    dy = (H - dh) * p; break;
     case 'down':  dy = (H - dh) * (1 - p); break;
     case 'zoom-in': {
-      const s = 1 + 0.25 * p;
+      const s = 1 + 0.18 * p;
       dw = baseW * s; dh = baseH * s;
       dx = (W - dw) / 2; dy = (H - dh) / 2;
       break;
     }
     case 'zoom-out': {
-      const s = 1.25 - 0.25 * p;
+      const s = 1.18 - 0.18 * p;
       dw = baseW * s; dh = baseH * s;
       dx = (W - dw) / 2; dy = (H - dh) / 2;
       break;
@@ -384,7 +408,18 @@ function drawClipPan(img, panType, progress) {
       dw = baseW; dh = baseH;
       dx = (W - dw) / 2; dy = (H - dh) / 2;
   }
-  ctx.drawImage(img, dx, dy, dw, dh);
+  target.drawImage(img, dx, dy, dw, dh);
+}
+
+const offscreen = document.createElement('canvas');
+function panToOffscreen(img, panType, progress) {
+  if (offscreen.width !== canvas.width) offscreen.width = canvas.width;
+  if (offscreen.height !== canvas.height) offscreen.height = canvas.height;
+  const oc = offscreen.getContext('2d');
+  oc.fillStyle = '#000';
+  oc.fillRect(0, 0, canvas.width, canvas.height);
+  drawClipPan(img, panType, progress, oc);
+  return offscreen;
 }
 function applyTransition(prevImg, prevPan, prevProg, newImg, newPan, newProg, type, tp) {
   const W = canvas.width, H = canvas.height;
@@ -415,37 +450,47 @@ function applyTransition(prevImg, prevPan, prevProg, newImg, newPan, newProg, ty
       }
       break;
     case 'book': {
-      // Realistic book page peel: old page peels from right edge to left,
-      // revealing new page underneath, with curl shading and drop shadow.
+      // Realistic book peel with cylindrical curl: old page lifts from
+      // right edge, the airborne portion is foreshortened (compressed
+      // horizontally) and shaded as a half-cylinder; new page visible
+      // underneath with a soft drop shadow.
       drawClipPan(newImg, newPan, newProg);
       const foldX = W * (1 - tp);
+      if (foldX <= 0) break;
 
-      // Old page clipped to left of fold
-      ctx.save();
-      ctx.beginPath(); ctx.rect(0, 0, foldX, H); ctx.clip();
-      drawClipPan(prevImg, prevPan, prevProg);
-      // Curl darkening on the trailing edge of old page
-      const curlW = Math.min(80, Math.max(20, foldX * 0.35));
-      const g1 = ctx.createLinearGradient(foldX - curlW, 0, foldX, 0);
-      g1.addColorStop(0, 'rgba(0,0,0,0)');
-      g1.addColorStop(0.7, 'rgba(0,0,0,0.25)');
-      g1.addColorStop(1, 'rgba(0,0,0,0.55)');
-      ctx.fillStyle = g1;
-      ctx.fillRect(foldX - curlW, 0, curlW, H);
-      ctx.restore();
+      const off = panToOffscreen(prevImg, prevPan, prevProg);
 
-      // Drop shadow on new page just past the fold
-      const shW = Math.min(120, Math.max(30, (W - foldX) * 0.4));
-      const g2 = ctx.createLinearGradient(foldX, 0, foldX + shW, 0);
-      g2.addColorStop(0, 'rgba(0,0,0,0.55)');
-      g2.addColorStop(0.4, 'rgba(0,0,0,0.18)');
-      g2.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = g2;
-      ctx.fillRect(foldX, 0, shW, H);
+      // Flat portion still on the table (left of fold)
+      ctx.drawImage(off, 0, 0, foldX, H, 0, 0, foldX, H);
 
-      // Bright spine line at fold
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ctx.fillRect(foldX - 1, 0, 2, H);
+      const lifted = W - foldX;
+      if (lifted > 1) {
+        // Compress lifted strip to simulate foreshortening (a half-cylinder
+        // projects to ~ 2R; we squeeze the original strip into curlW).
+        const curlW = Math.min(lifted, Math.max(40, lifted * 0.28 + 24));
+        ctx.drawImage(off, foldX, 0, lifted, H, foldX, 0, curlW, H);
+
+        // Cylindrical shading (dark - light - dark across the curl)
+        const cg = ctx.createLinearGradient(foldX, 0, foldX + curlW, 0);
+        cg.addColorStop(0,    'rgba(0,0,0,0.55)');
+        cg.addColorStop(0.45, 'rgba(255,255,255,0.18)');
+        cg.addColorStop(0.55, 'rgba(255,255,255,0.18)');
+        cg.addColorStop(1,    'rgba(0,0,0,0.55)');
+        ctx.fillStyle = cg;
+        ctx.fillRect(foldX, 0, curlW, H);
+
+        // Drop shadow falling onto new page beyond the curl
+        const sw = Math.min(140, lifted * 0.45 + 30);
+        const sg = ctx.createLinearGradient(foldX + curlW, 0, foldX + curlW + sw, 0);
+        sg.addColorStop(0, 'rgba(0,0,0,0.5)');
+        sg.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = sg;
+        ctx.fillRect(foldX + curlW, 0, sw, H);
+
+        // Bright fold spine highlight
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        ctx.fillRect(foldX - 1, 0, 2, H);
+      }
       break;
     }
     default:
@@ -660,6 +705,12 @@ function buildInspector() {
     inspectorBody.appendChild(row('底框透明度', numInput(st.bgOpacity, 0.05, v => { st.bgOpacity = Math.min(1, Math.max(0, v)); render(); })));
     inspectorBody.appendChild(row('垂直位置 (% 上)', numInput(st.yPercent, 1, v => { st.yPercent = Math.min(100, Math.max(0, v)); render(); })));
 
+    if (state.clips.length > 0 && state.subtitles.length > 0) {
+      inspectorBody.appendChild(sectionTitle('批量操作'));
+      inspectorBody.appendChild(buttonRow([
+        ['图片翻页时长 → 对齐字幕', () => { alignClipsToSubtitles(); rebuild(); }],
+      ]));
+    }
     if (state.clips.length === 0) {
       const tip = document.createElement('p');
       tip.className = 'hint';
@@ -896,6 +947,10 @@ ruler.addEventListener('mousedown', (ev) => {
 // ---------- Transport ----------
 $('#btn-play').onclick = () => { state.playing ? pause() : play(); };
 $('#btn-stop').onclick = () => { pause(); setCurrentTime(0); };
+$('#btn-fullscreen').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else canvas.requestFullscreen?.().catch(() => {});
+};
 seek.oninput = () => setCurrentTime(parseFloat(seek.value));
 
 let rafId = null;

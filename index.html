@@ -32,6 +32,7 @@
       <div class="transport">
         <button id="btn-play">▶ 播放</button>
         <button id="btn-stop">■ 停止</button>
+        <button id="btn-fullscreen">⛶ 全屏预览</button>
         <input type="range" id="seek" min="0" max="0" step="0.01" value="0" />
         <span id="time-label">0.00 / 0.00</span>
       </div>
@@ -96,7 +97,10 @@
         <input type="number" id="script-per-line" value="3" step="0.1" min="0.5" />
       </div>
       <div class="modal-row">
-        <label><input type="checkbox" id="script-replace-clips" checked /> 让图片片段平均铺满总时长</label>
+        <label><input type="checkbox" id="script-proportional" checked /> 按字数比例分配时长（推荐：长句更长）</label>
+      </div>
+      <div class="modal-row">
+        <label><input type="checkbox" id="script-replace-clips" checked /> 图片翻页时长自动对齐字幕</label>
       </div>
       <div class="modal-actions">
         <button id="modal-cancel">取消</button>
