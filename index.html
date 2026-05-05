@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>图文混剪</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">图文混剪 MVP</div>
+    <div class="actions">
+      <button id="btn-add-images">+ 图片</button>
+      <button id="btn-add-audio">+ 音频</button>
+      <button id="btn-add-subtitle">+ 字幕</button>
+      <button id="btn-save">保存工程</button>
+      <button id="btn-load">加载工程</button>
+      <button id="btn-export" class="primary">导出 WebM</button>
+    </div>
+    <input type="file" id="file-images" accept="image/*" multiple hidden />
+    <input type="file" id="file-audio" accept="audio/*" hidden />
+    <input type="file" id="file-load" accept="application/json" hidden />
+  </header>
+
+  <main class="workspace">
+    <section class="preview">
+      <div class="canvas-wrap">
+        <canvas id="stage" width="1280" height="720"></canvas>
+      </div>
+      <div class="transport">
+        <button id="btn-play">▶ 播放</button>
+        <button id="btn-stop">■ 停止</button>
+        <input type="range" id="seek" min="0" max="0" step="0.01" value="0" />
+        <span id="time-label">0.00 / 0.00</span>
+      </div>
+    </section>
+
+    <aside class="inspector">
+      <div class="inspector-title">属性</div>
+      <div id="inspector-body" class="inspector-body">
+        <p class="hint">在时间轴上选中片段或字幕来编辑。</p>
+      </div>
+    </aside>
+  </main>
+
+  <section class="timeline">
+    <div class="track-labels">
+      <div class="track-label">图片</div>
+      <div class="track-label">字幕</div>
+      <div class="track-label">音频</div>
+    </div>
+    <div class="track-area" id="track-area">
+      <div class="ruler" id="ruler"></div>
+      <div class="track" id="track-images"></div>
+      <div class="track" id="track-subtitles"></div>
+      <div class="track" id="track-audio"></div>
+      <div class="playhead" id="playhead"></div>
+    </div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
