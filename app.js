@@ -1,17 +1,33 @@
 // ---------- State ----------
 const state = {
-  images: [],     // { id, name, img: HTMLImageElement, dataUrl }
+  images: [],     // { id, name, img, dataUrl }
   clips: [],      // { id, imageId, duration, pan, transition, transitionDuration }
   subtitles: [],  // { id, text, start, end }
-  audio: null,    // { name, el: HTMLAudioElement, dataUrl, duration }
+  audio: null,    // { name, el, dataUrl, duration }
   currentTime: 0,
   playing: false,
   selection: null, // { kind: 'clip'|'subtitle', id }
   pxPerSec: 60,
+  aspect: '16:9',
+  subtitleStyle: {
+    fontSize: 5.0,        // % of canvas height
+    color: '#ffffff',
+    bgOpacity: 0.55,
+    yPercent: 88,         // % from top
+    strokeColor: '#000000',
+    strokeWidth: 0,       // px (in canvas space)
+  },
 };
 
 let nextId = 1;
 const uid = () => String(nextId++);
+
+const ASPECTS = {
+  '16:9': [1280, 720],
+  '9:16': [720, 1280],
+  '1:1':  [1080, 1080],
+  '4:3':  [1280, 960],
+};
 
 // ---------- DOM ----------
 const $ = (s) => document.querySelector(s);
@@ -27,42 +43,41 @@ const inspectorBody = $('#inspector-body');
 const seek = $('#seek');
 const timeLabel = $('#time-label');
 
-// ---------- Derived ----------
-function clipStart(idx) {
-  let t = 0;
-  for (let i = 0; i < idx; i++) t += state.clips[i].duration;
-  return t;
-}
-function totalImageDuration() {
-  return state.clips.reduce((a, c) => a + c.duration, 0);
-}
+applyAspect(state.aspect);
+
+// ---------- Helpers ----------
+function totalImageDuration() { return state.clips.reduce((a, c) => a + c.duration, 0); }
 function totalDuration() {
   const subEnd = state.subtitles.reduce((m, s) => Math.max(m, s.end), 0);
-  return Math.max(totalImageDuration(), state.audio?.duration || 0, subEnd);
+  return Math.max(totalImageDuration(), state.audio?.duration || 0, subEnd, 0.01);
+}
+function applyAspect(name) {
+  state.aspect = name;
+  const [w, h] = ASPECTS[name] || ASPECTS['16:9'];
+  canvas.width = w; canvas.height = h;
+  canvas.style.aspectRatio = name.replace(':', '/');
 }
 
-// ---------- File handlers ----------
+// ---------- File input ----------
 $('#btn-add-images').onclick = () => $('#file-images').click();
 $('#file-images').onchange = (e) => {
-  for (const f of e.target.files) loadImageFile(f);
+  const files = Array.from(e.target.files);
+  files.forEach(loadImageFile);
   e.target.value = '';
 };
-
 $('#btn-add-audio').onclick = () => $('#file-audio').click();
 $('#file-audio').onchange = (e) => {
   const f = e.target.files[0];
   if (f) loadAudioFile(f);
   e.target.value = '';
 };
-
 $('#btn-add-subtitle').onclick = () => {
   const t = state.currentTime;
-  const sub = { id: uid(), text: '新字幕', start: t, end: Math.min(t + 2, Math.max(t + 2, totalDuration() || t + 2)) };
+  const sub = { id: uid(), text: '新字幕', start: t, end: t + 2 };
   state.subtitles.push(sub);
   state.selection = { kind: 'subtitle', id: sub.id };
   rebuild();
 };
-
 $('#btn-save').onclick = saveProject;
 $('#btn-load').onclick = () => $('#file-load').click();
 $('#file-load').onchange = (e) => {
@@ -70,8 +85,8 @@ $('#file-load').onchange = (e) => {
   if (f) loadProject(f);
   e.target.value = '';
 };
-
 $('#btn-export').onclick = exportVideo;
+$('#btn-script').onclick = openScriptModal;
 
 function loadImageFile(file) {
   const reader = new FileReader();
@@ -91,7 +106,6 @@ function loadImageFile(file) {
   };
   reader.readAsDataURL(file);
 }
-
 function loadAudioFile(file) {
   const reader = new FileReader();
   reader.onload = () => {
@@ -105,10 +119,72 @@ function loadAudioFile(file) {
   reader.readAsDataURL(file);
 }
 
-// ---------- Project save/load ----------
+// ---------- Drag & drop files ----------
+const dropzone = $('#dropzone');
+let dragDepth = 0;
+window.addEventListener('dragenter', (e) => {
+  if (!e.dataTransfer?.types.includes('Files')) return;
+  dragDepth++; dropzone.classList.remove('hidden');
+});
+window.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) dropzone.classList.add('hidden');
+});
+window.addEventListener('dragover', (e) => { e.preventDefault(); });
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragDepth = 0; dropzone.classList.add('hidden');
+  const files = Array.from(e.dataTransfer.files);
+  for (const f of files) {
+    if (f.type.startsWith('image/')) loadImageFile(f);
+    else if (f.type.startsWith('audio/')) loadAudioFile(f);
+  }
+});
+
+// ---------- Script modal ----------
+function openScriptModal() {
+  $('#script-text').value = state.subtitles.map(s => s.text).join('\n');
+  $('#modal').classList.remove('hidden');
+}
+$('#modal-cancel').onclick = () => $('#modal').classList.add('hidden');
+$('#modal-apply').onclick = () => {
+  const text = $('#script-text').value;
+  const perLine = parseFloat($('#script-per-line').value) || 3;
+  const replace = $('#script-replace-clips').checked;
+  applyScript(text, perLine, replace);
+  $('#modal').classList.add('hidden');
+};
+
+function applyScript(text, perLine, redistributeClips) {
+  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if (lines.length === 0) return;
+  const total = state.audio?.duration || (lines.length * perLine);
+  const seg = total / lines.length;
+  state.subtitles = lines.map((t, i) => ({
+    id: uid(),
+    text: t,
+    start: i * seg,
+    end: Math.max(i * seg + 0.1, (i + 1) * seg - 0.05),
+  }));
+  if (redistributeClips && state.clips.length > 0) {
+    const n = state.clips.length;
+    if (n === lines.length) {
+      // Perfect 1:1 — each clip aligns to one subtitle
+      state.clips.forEach((c, i) => { c.duration = seg; });
+    } else {
+      const each = total / n;
+      state.clips.forEach(c => { c.duration = each; });
+    }
+  }
+  rebuild();
+}
+
+// ---------- Save / Load ----------
 function saveProject() {
   const data = {
-    version: 1,
+    version: 2,
+    aspect: state.aspect,
+    subtitleStyle: state.subtitleStyle,
     images: state.images.map(({ id, name, dataUrl }) => ({ id, name, dataUrl })),
     clips: state.clips,
     subtitles: state.subtitles,
@@ -121,13 +197,14 @@ function saveProject() {
   a.download = 'project.json';
   a.click();
 }
-
 function loadProject(file) {
   const reader = new FileReader();
   reader.onload = () => {
     const data = JSON.parse(reader.result);
     state.images = []; state.clips = []; state.subtitles = []; state.audio = null;
     nextId = data.nextId || 1;
+    if (data.aspect) applyAspect(data.aspect);
+    if (data.subtitleStyle) state.subtitleStyle = { ...state.subtitleStyle, ...data.subtitleStyle };
     let pending = data.images.length + (data.audio ? 1 : 0);
     if (pending === 0) finish();
     for (const m of data.images) {
@@ -155,7 +232,7 @@ function loadProject(file) {
   reader.readAsText(file);
 }
 
-// ---------- Render canvas ----------
+// ---------- Render ----------
 function drawClipPan(img, panType, progress) {
   const W = canvas.width, H = canvas.height;
   const ir = img.width / img.height;
@@ -192,7 +269,6 @@ function drawClipPan(img, panType, progress) {
   }
   ctx.drawImage(img, dx, dy, dw, dh);
 }
-
 function applyTransition(prevImg, prevPan, prevProg, newImg, newPan, newProg, type, tp) {
   const W = canvas.width, H = canvas.height;
   switch (type) {
@@ -203,60 +279,91 @@ function applyTransition(prevImg, prevPan, prevProg, newImg, newPan, newProg, ty
       ctx.globalAlpha = 1;
       break;
     case 'slide-left':
-      ctx.save(); ctx.translate(-W * tp, 0);
-      drawClipPan(prevImg, prevPan, prevProg);
-      ctx.restore();
-      ctx.save(); ctx.translate(W * (1 - tp), 0);
-      drawClipPan(newImg, newPan, newProg);
-      ctx.restore();
+      ctx.save(); ctx.translate(-W * tp, 0); drawClipPan(prevImg, prevPan, prevProg); ctx.restore();
+      ctx.save(); ctx.translate(W * (1 - tp), 0); drawClipPan(newImg, newPan, newProg); ctx.restore();
       break;
     case 'slide-right':
-      ctx.save(); ctx.translate(W * tp, 0);
-      drawClipPan(prevImg, prevPan, prevProg);
-      ctx.restore();
-      ctx.save(); ctx.translate(-W * (1 - tp), 0);
-      drawClipPan(newImg, newPan, newProg);
-      ctx.restore();
+      ctx.save(); ctx.translate(W * tp, 0); drawClipPan(prevImg, prevPan, prevProg); ctx.restore();
+      ctx.save(); ctx.translate(-W * (1 - tp), 0); drawClipPan(newImg, newPan, newProg); ctx.restore();
       break;
-    case 'flip': {
-      // Page-flip approximation via horizontal scale around center.
+    case 'flip':
       if (tp < 0.5) {
         const s = 1 - tp * 2;
-        ctx.save();
-        ctx.translate(W / 2, 0); ctx.scale(s, 1); ctx.translate(-W / 2, 0);
-        drawClipPan(prevImg, prevPan, prevProg);
-        ctx.restore();
+        ctx.save(); ctx.translate(W / 2, 0); ctx.scale(s, 1); ctx.translate(-W / 2, 0);
+        drawClipPan(prevImg, prevPan, prevProg); ctx.restore();
       } else {
         const s = (tp - 0.5) * 2;
-        ctx.save();
-        ctx.translate(W / 2, 0); ctx.scale(s, 1); ctx.translate(-W / 2, 0);
-        drawClipPan(newImg, newPan, newProg);
-        ctx.restore();
+        ctx.save(); ctx.translate(W / 2, 0); ctx.scale(s, 1); ctx.translate(-W / 2, 0);
+        drawClipPan(newImg, newPan, newProg); ctx.restore();
       }
       break;
-    }
     default:
       drawClipPan(newImg, newPan, newProg);
   }
 }
-
 function drawSubtitle(text) {
   const W = canvas.width, H = canvas.height;
-  const fs = Math.floor(H * 0.05);
+  const st = state.subtitleStyle;
+  const fs = Math.max(12, Math.floor(H * st.fontSize / 100));
   ctx.font = `600 ${fs}px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  const m = ctx.measureText(text);
-  const padX = 18, padY = 10;
-  const boxW = m.width + padX * 2;
-  const boxH = fs + padY * 2;
+
+  // Wrap by canvas width
+  const maxW = W * 0.86;
+  const lines = wrapText(text, maxW);
+  const lineH = fs * 1.3;
   const cx = W / 2;
-  const cy = H - H * 0.10;
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  roundRect(ctx, cx - boxW / 2, cy - boxH / 2, boxW, boxH, 6);
-  ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.fillText(text, cx, cy);
+  const cy = H * st.yPercent / 100;
+  const totalH = lines.length * lineH;
+  const startY = cy - totalH / 2 + lineH / 2;
+
+  // bg
+  if (st.bgOpacity > 0) {
+    let widest = 0;
+    for (const ln of lines) widest = Math.max(widest, ctx.measureText(ln).width);
+    const padX = fs * 0.6, padY = fs * 0.3;
+    const boxW = widest + padX * 2;
+    const boxH = totalH + padY * 2;
+    ctx.fillStyle = `rgba(0,0,0,${st.bgOpacity})`;
+    roundRect(ctx, cx - boxW / 2, cy - boxH / 2, boxW, boxH, 8);
+    ctx.fill();
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const y = startY + i * lineH;
+    if (st.strokeWidth > 0) {
+      ctx.lineWidth = st.strokeWidth;
+      ctx.strokeStyle = st.strokeColor;
+      ctx.lineJoin = 'round';
+      ctx.strokeText(lines[i], cx, y);
+    }
+    ctx.fillStyle = st.color;
+    ctx.fillText(lines[i], cx, y);
+  }
+}
+function wrapText(text, maxW) {
+  // Greedy wrap; supports CJK by char, latin by word
+  const tokens = [];
+  let buf = '';
+  for (const ch of text) {
+    if (/\s/.test(ch)) { if (buf) { tokens.push(buf); buf = ''; } tokens.push(ch); }
+    else if (ch.charCodeAt(0) > 0x2E80) { if (buf) { tokens.push(buf); buf = ''; } tokens.push(ch); }
+    else buf += ch;
+  }
+  if (buf) tokens.push(buf);
+  const lines = [];
+  let line = '';
+  for (const tk of tokens) {
+    const trial = line + tk;
+    if (ctx.measureText(trial).width > maxW && line.trim()) {
+      lines.push(line.trimEnd());
+      line = tk.trim() ? tk : '';
+    } else {
+      line = trial;
+    }
+  }
+  if (line.trim()) lines.push(line.trimEnd());
+  return lines.length ? lines : [text];
 }
 function roundRect(c, x, y, w, h, r) {
   c.beginPath();
@@ -281,11 +388,7 @@ function render() {
       if (t < acc + c.duration) { idx = i; localT = t - acc; break; }
       acc += c.duration;
     }
-    if (idx < 0) {
-      // After last clip: hold last frame
-      idx = state.clips.length - 1;
-      localT = state.clips[idx].duration;
-    }
+    if (idx < 0) { idx = state.clips.length - 1; localT = state.clips[idx].duration; }
     const clip = state.clips[idx];
     const img = state.images.find(i => i.id === clip.imageId);
     const progress = clip.duration > 0 ? localT / clip.duration : 1;
@@ -295,22 +398,22 @@ function render() {
       const prev = state.clips[idx - 1];
       const prevImg = state.images.find(i => i.id === prev.imageId);
       const tp = localT / tDur;
-      applyTransition(prevImg.img, prev.pan, 1, img.img, clip.pan, progress, clip.transition, tp);
+      if (prevImg && img) applyTransition(prevImg.img, prev.pan, 1, img.img, clip.pan, progress, clip.transition, tp);
+      else if (img) drawClipPan(img.img, clip.pan, progress);
     } else if (img) {
       drawClipPan(img.img, clip.pan, progress);
     }
   }
-
   const sub = state.subtitles.find(s => t >= s.start && t < s.end);
   if (sub) drawSubtitle(sub.text);
 }
 
-// ---------- Timeline UI ----------
+// ---------- Timeline ----------
 function rebuild() {
-  // Build ruler
   const dur = totalDuration();
-  const widthPx = Math.max(trackArea.clientWidth - 0, dur * state.pxPerSec + 60);
+  const widthPx = Math.max(trackArea.clientWidth, dur * state.pxPerSec + 60);
   ruler.style.width = trackImages.style.width = trackSubs.style.width = trackAudio.style.width = widthPx + 'px';
+
   ruler.innerHTML = '';
   const step = state.pxPerSec >= 60 ? 1 : 2;
   for (let s = 0; s <= dur + step; s += step) {
@@ -321,7 +424,6 @@ function rebuild() {
     ruler.appendChild(tick);
   }
 
-  // Image clips
   trackImages.innerHTML = '';
   let acc = 0;
   state.clips.forEach((c, i) => {
@@ -329,11 +431,15 @@ function rebuild() {
     el.className = 'clip';
     if (state.selection?.kind === 'clip' && state.selection.id === c.id) el.classList.add('selected');
     const img = state.images.find(im => im.id === c.imageId);
-    el.textContent = img ? img.name : '(图片缺失)';
+    el.textContent = `${i + 1}. ${img ? img.name : '(图片缺失)'}`;
     el.style.left = (acc * state.pxPerSec) + 'px';
     el.style.width = (c.duration * state.pxPerSec) + 'px';
     el.dataset.id = c.id;
     el.onclick = () => { state.selection = { kind: 'clip', id: c.id }; rebuild(); };
+    el.onmousedown = (ev) => {
+      if (ev.target !== el) return;
+      startReorderClip(ev, c.id, i);
+    };
     const r = document.createElement('div');
     r.className = 'handle right';
     r.onmousedown = (ev) => startResizeClip(ev, c.id);
@@ -342,7 +448,6 @@ function rebuild() {
     acc += c.duration;
   });
 
-  // Subtitle clips
   trackSubs.innerHTML = '';
   state.subtitles.forEach(s => {
     const el = document.createElement('div');
@@ -360,14 +465,10 @@ function rebuild() {
     right.className = 'handle right';
     right.onmousedown = (ev) => startResizeSubtitle(ev, s.id, 'end');
     el.appendChild(left); el.appendChild(right);
-    el.onmousedown = (ev) => {
-      if (ev.target !== el) return;
-      startMoveSubtitle(ev, s.id);
-    };
+    el.onmousedown = (ev) => { if (ev.target === el) startMoveSubtitle(ev, s.id); };
     trackSubs.appendChild(el);
   });
 
-  // Audio
   trackAudio.innerHTML = '';
   if (state.audio) {
     const el = document.createElement('div');
@@ -378,7 +479,6 @@ function rebuild() {
     trackAudio.appendChild(el);
   }
 
-  // Seek bar bounds
   seek.max = dur.toFixed(2);
   seek.value = state.currentTime.toFixed(2);
   updatePlayhead();
@@ -386,47 +486,69 @@ function rebuild() {
   buildInspector();
   render();
 }
-
-function updatePlayhead() {
-  const x = state.currentTime * state.pxPerSec;
-  playhead.style.left = x + 'px';
-}
-function updateTimeLabel() {
-  timeLabel.textContent = `${state.currentTime.toFixed(2)} / ${totalDuration().toFixed(2)}`;
-}
+function updatePlayhead() { playhead.style.left = (state.currentTime * state.pxPerSec) + 'px'; }
+function updateTimeLabel() { timeLabel.textContent = `${state.currentTime.toFixed(2)} / ${totalDuration().toFixed(2)}`; }
 
 // ---------- Inspector ----------
 function buildInspector() {
   inspectorBody.innerHTML = '';
   const sel = state.selection;
+
   if (!sel) {
-    inspectorBody.innerHTML = '<p class="hint">在时间轴上选中片段或字幕来编辑。</p>';
+    inspectorBody.appendChild(sectionTitle('视频设置'));
+    inspectorBody.appendChild(row('画幅', selectInput(state.aspect, [
+      ['16:9','16:9 横屏'],['9:16','9:16 竖屏'],['1:1','1:1 方形'],['4:3','4:3'],
+    ], v => { applyAspect(v); rebuild(); })));
+
+    inspectorBody.appendChild(sectionTitle('字幕样式'));
+    const st = state.subtitleStyle;
+    inspectorBody.appendChild(row('字号 (% 高)', numInput(st.fontSize, 0.1, v => { st.fontSize = Math.max(1, v); render(); })));
+    inspectorBody.appendChild(row('文字颜色', colorInput(st.color, v => { st.color = v; render(); })));
+    inspectorBody.appendChild(row('描边粗细 (px)', numInput(st.strokeWidth, 0.5, v => { st.strokeWidth = Math.max(0, v); render(); })));
+    inspectorBody.appendChild(row('描边颜色', colorInput(st.strokeColor, v => { st.strokeColor = v; render(); })));
+    inspectorBody.appendChild(row('底框透明度', numInput(st.bgOpacity, 0.05, v => { st.bgOpacity = Math.min(1, Math.max(0, v)); render(); })));
+    inspectorBody.appendChild(row('垂直位置 (% 上)', numInput(st.yPercent, 1, v => { st.yPercent = Math.min(100, Math.max(0, v)); render(); })));
+
+    if (state.clips.length === 0) {
+      const tip = document.createElement('p');
+      tip.className = 'hint';
+      tip.style.marginTop = '12px';
+      tip.textContent = '提示：拖拽图片或音频到窗口，或点顶部按钮上传。然后点 "📝 粘文案" 一键对齐。';
+      inspectorBody.appendChild(tip);
+    }
     return;
   }
+
   if (sel.kind === 'clip') {
     const clip = state.clips.find(c => c.id === sel.id);
     if (!clip) return;
+    const idx = state.clips.indexOf(clip);
+    inspectorBody.appendChild(sectionTitle(`图片片段 ${idx + 1}`));
     inspectorBody.appendChild(row('时长（秒）', numInput(clip.duration, 0.1, v => { clip.duration = Math.max(0.1, v); rebuild(); })));
     inspectorBody.appendChild(row('平移效果', selectInput(clip.pan, [
-      ['none','无'], ['left','向左'], ['right','向右'],
-      ['up','向上'], ['down','向下'],
-      ['zoom-in','放大'], ['zoom-out','缩小'],
+      ['none','无'],['left','向左'],['right','向右'],['up','向上'],['down','向下'],
+      ['zoom-in','放大'],['zoom-out','缩小'],
     ], v => { clip.pan = v; rebuild(); })));
     inspectorBody.appendChild(row('入场过渡', selectInput(clip.transition, [
-      ['none','直切'], ['fade','淡入'], ['slide-left','左滑'], ['slide-right','右滑'], ['flip','翻页'],
+      ['none','直切'],['fade','淡入'],['slide-left','左滑'],['slide-right','右滑'],['flip','翻页'],
     ], v => { clip.transition = v; rebuild(); })));
     inspectorBody.appendChild(row('过渡时长', numInput(clip.transitionDuration, 0.05, v => { clip.transitionDuration = Math.max(0, v); rebuild(); })));
     inspectorBody.appendChild(buttonRow([
       ['上移', () => moveClip(clip.id, -1)],
       ['下移', () => moveClip(clip.id, +1)],
+      ['对齐到字幕', () => snapClipToSubtitle(clip.id)],
     ]));
     inspectorBody.appendChild(dangerButton('删除片段', () => {
       state.clips = state.clips.filter(c => c.id !== clip.id);
       state.selection = null; rebuild();
     }));
-  } else if (sel.kind === 'subtitle') {
+    return;
+  }
+
+  if (sel.kind === 'subtitle') {
     const sub = state.subtitles.find(s => s.id === sel.id);
     if (!sub) return;
+    inspectorBody.appendChild(sectionTitle('字幕'));
     inspectorBody.appendChild(row('文案', textArea(sub.text, v => { sub.text = v; rebuild(); })));
     inspectorBody.appendChild(row('开始（秒）', numInput(sub.start, 0.1, v => { sub.start = Math.max(0, v); if (sub.end <= sub.start) sub.end = sub.start + 0.5; rebuild(); })));
     inspectorBody.appendChild(row('结束（秒）', numInput(sub.end, 0.1, v => { sub.end = Math.max(sub.start + 0.1, v); rebuild(); })));
@@ -435,6 +557,25 @@ function buildInspector() {
       state.selection = null; rebuild();
     }));
   }
+}
+function snapClipToSubtitle(clipId) {
+  // Set this clip's start (cumulative) to the nearest subtitle start by adjusting prior clip durations is too invasive.
+  // Instead: set its duration to match the duration of subtitle starting nearest to its start.
+  const idx = state.clips.findIndex(c => c.id === clipId);
+  if (idx < 0) return;
+  let start = 0;
+  for (let i = 0; i < idx; i++) start += state.clips[i].duration;
+  const sub = state.subtitles.find(s => Math.abs(s.start - start) < 0.5) ||
+              state.subtitles.reduce((best, s) => Math.abs(s.start - start) < Math.abs(best.start - start) ? s : best, state.subtitles[0]);
+  if (!sub) return;
+  state.clips[idx].duration = Math.max(0.2, sub.end - sub.start);
+  rebuild();
+}
+function sectionTitle(text) {
+  const d = document.createElement('div');
+  d.style.cssText = 'font-weight:600;margin:4px 0 8px;color:#cfd3da;border-bottom:1px solid var(--line);padding-bottom:4px;';
+  d.textContent = text;
+  return d;
 }
 function row(label, control) {
   const w = document.createElement('div');
@@ -461,6 +602,12 @@ function selectInput(value, options, onChange) {
   s.onchange = () => onChange(s.value);
   return s;
 }
+function colorInput(value, onChange) {
+  const i = document.createElement('input');
+  i.type = 'color'; i.value = value;
+  i.oninput = () => onChange(i.value);
+  return i;
+}
 function textArea(value, onChange) {
   const t = document.createElement('textarea');
   t.value = value;
@@ -471,7 +618,7 @@ function buttonRow(items) {
   const w = document.createElement('div');
   w.className = 'row';
   const c = document.createElement('div');
-  c.style.display = 'flex'; c.style.gap = '6px';
+  c.style.display = 'flex'; c.style.gap = '6px'; c.style.flexWrap = 'wrap';
   for (const [label, fn] of items) {
     const b = document.createElement('button');
     b.textContent = label; b.onclick = fn;
@@ -488,19 +635,53 @@ function dangerButton(label, fn) {
   w.appendChild(b);
   return w;
 }
-
 function moveClip(id, dir) {
   const idx = state.clips.findIndex(c => c.id === id);
   const ni = idx + dir;
   if (idx < 0 || ni < 0 || ni >= state.clips.length) return;
-  const arr = state.clips;
-  [arr[idx], arr[ni]] = [arr[ni], arr[idx]];
+  [state.clips[idx], state.clips[ni]] = [state.clips[ni], state.clips[idx]];
   rebuild();
 }
 
 // ---------- Drag interactions ----------
+function startReorderClip(ev, id, originalIdx) {
+  ev.preventDefault();
+  let lastSwap = originalIdx;
+  const startX = ev.clientX;
+  const onMove = (e) => {
+    const dx = e.clientX - startX;
+    // Compute absolute timeline x for this clip's center under drag
+    const me = state.clips.findIndex(c => c.id === id);
+    if (me < 0) return;
+    let myStart = 0;
+    for (let i = 0; i < me; i++) myStart += state.clips[i].duration;
+    const myCenterPx = (myStart + state.clips[me].duration / 2) * state.pxPerSec + dx;
+    // Find target index by walking clips
+    let acc = 0, target = me;
+    for (let i = 0; i < state.clips.length; i++) {
+      const c = state.clips[i];
+      const center = (acc + c.duration / 2) * state.pxPerSec;
+      if (myCenterPx < center) { target = i; break; }
+      acc += c.duration;
+      target = i + 1;
+    }
+    if (target > me) target -= 1;
+    target = Math.max(0, Math.min(state.clips.length - 1, target));
+    if (target !== me) {
+      const [x] = state.clips.splice(me, 1);
+      state.clips.splice(target, 0, x);
+      rebuild();
+    }
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
 function startResizeClip(ev, id) {
-  ev.stopPropagation();
+  ev.stopPropagation(); ev.preventDefault();
   const clip = state.clips.find(c => c.id === id);
   const startX = ev.clientX;
   const startDur = clip.duration;
@@ -517,15 +698,14 @@ function startResizeClip(ev, id) {
   document.addEventListener('mouseup', onUp);
 }
 function startResizeSubtitle(ev, id, edge) {
-  ev.stopPropagation();
+  ev.stopPropagation(); ev.preventDefault();
   const sub = state.subtitles.find(s => s.id === id);
   const startX = ev.clientX;
-  const startStart = sub.start, startEnd = sub.end;
+  const s0 = sub.start, e0 = sub.end;
   const onMove = (e) => {
-    const dx = e.clientX - startX;
-    const dt = dx / state.pxPerSec;
-    if (edge === 'start') sub.start = Math.min(sub.end - 0.1, Math.max(0, startStart + dt));
-    else sub.end = Math.max(sub.start + 0.1, startEnd + dt);
+    const dt = (e.clientX - startX) / state.pxPerSec;
+    if (edge === 'start') sub.start = Math.min(sub.end - 0.1, Math.max(0, s0 + dt));
+    else sub.end = Math.max(sub.start + 0.1, e0 + dt);
     rebuild();
   };
   const onUp = () => {
@@ -536,14 +716,13 @@ function startResizeSubtitle(ev, id, edge) {
   document.addEventListener('mouseup', onUp);
 }
 function startMoveSubtitle(ev, id) {
+  ev.preventDefault();
   const sub = state.subtitles.find(s => s.id === id);
   const startX = ev.clientX;
-  const startStart = sub.start, startEnd = sub.end;
-  const len = startEnd - startStart;
+  const s0 = sub.start, e0 = sub.end, len = e0 - s0;
   const onMove = (e) => {
-    const dx = e.clientX - startX;
-    const dt = dx / state.pxPerSec;
-    sub.start = Math.max(0, startStart + dt);
+    const dt = (e.clientX - startX) / state.pxPerSec;
+    sub.start = Math.max(0, s0 + dt);
     sub.end = sub.start + len;
     rebuild();
   };
@@ -555,14 +734,12 @@ function startMoveSubtitle(ev, id) {
   document.addEventListener('mouseup', onUp);
 }
 
-// Click ruler / track to seek
-function seekFromEvent(ev) {
+ruler.addEventListener('mousedown', (ev) => {
   const rect = trackArea.getBoundingClientRect();
   const x = ev.clientX - rect.left + trackArea.scrollLeft;
   const t = Math.max(0, Math.min(totalDuration(), x / state.pxPerSec));
   setCurrentTime(t);
-}
-ruler.addEventListener('mousedown', seekFromEvent);
+});
 
 // ---------- Transport ----------
 $('#btn-play').onclick = () => { state.playing ? pause() : play(); };
@@ -573,6 +750,7 @@ let rafId = null;
 let lastTs = 0;
 function play() {
   if (state.playing) return;
+  if (state.currentTime >= totalDuration() - 0.01) state.currentTime = 0;
   state.playing = true;
   $('#btn-play').textContent = '⏸ 暂停';
   if (state.audio) {
@@ -587,7 +765,7 @@ function play() {
     let t = state.currentTime + dt;
     const dur = totalDuration();
     if (t >= dur) { t = dur; pause(); }
-    setCurrentTime(t, /*fromPlay*/ true);
+    setCurrentTime(t, true);
     rafId = requestAnimationFrame(tick);
   };
   rafId = requestAnimationFrame(tick);
@@ -608,11 +786,18 @@ function setCurrentTime(t, fromPlay = false) {
 }
 
 // ---------- Export ----------
+let exportCancelled = false;
+$('#export-cancel').onclick = () => { exportCancelled = true; };
+
 async function exportVideo() {
   if (state.clips.length === 0) { alert('请先添加图片'); return; }
   pause();
+  exportCancelled = false;
   const wasTime = state.currentTime;
   setCurrentTime(0);
+
+  $('#export-overlay').classList.remove('hidden');
+  setExportProgress(0, '准备...');
 
   const fps = 30;
   const stream = canvas.captureStream(fps);
@@ -648,19 +833,20 @@ async function exportVideo() {
     };
   });
 
-  recorder.start();
+  recorder.start(200);
   if (state.audio) {
     state.audio.el.currentTime = 0;
     await state.audio.el.play().catch(() => {});
   }
 
+  const dur = totalDuration();
   await new Promise((resolve) => {
-    const dur = totalDuration();
     const startTs = performance.now();
     const step = () => {
       const elapsed = (performance.now() - startTs) / 1000;
-      if (elapsed >= dur) { resolve(); return; }
+      if (exportCancelled || elapsed >= dur) { resolve(); return; }
       setCurrentTime(elapsed, true);
+      setExportProgress(elapsed / dur, `导出中 ${(elapsed / dur * 100).toFixed(0)}%`);
       requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
@@ -668,8 +854,14 @@ async function exportVideo() {
 
   recorder.stop();
   if (state.audio) state.audio.el.pause();
+  if (audioCtx) audioCtx.close().catch(() => {});
   await done;
   setCurrentTime(wasTime);
+  $('#export-overlay').classList.add('hidden');
+}
+function setExportProgress(p, label) {
+  $('#export-bar').style.width = `${Math.min(100, Math.max(0, p * 100))}%`;
+  $('#export-status').textContent = label;
 }
 
 // ---------- Init ----------

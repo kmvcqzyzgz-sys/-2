@@ -13,8 +13,9 @@
       <button id="btn-add-images">+ 图片</button>
       <button id="btn-add-audio">+ 音频</button>
       <button id="btn-add-subtitle">+ 字幕</button>
-      <button id="btn-save">保存工程</button>
-      <button id="btn-load">加载工程</button>
+      <button id="btn-script" class="primary-soft">📝 粘文案</button>
+      <button id="btn-save">保存</button>
+      <button id="btn-load">加载</button>
       <button id="btn-export" class="primary">导出 WebM</button>
     </div>
     <input type="file" id="file-images" accept="image/*" multiple hidden />
@@ -57,6 +58,35 @@
       <div class="playhead" id="playhead"></div>
     </div>
   </section>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-title">粘贴文案 · 一键对齐</div>
+      <p class="hint">每一行 = 一张图片对应的一句文案。如果上传了音频，将均分音频时长；否则每行默认 3 秒。</p>
+      <textarea id="script-text" placeholder="第一句解说...&#10;第二句解说...&#10;第三句解说..."></textarea>
+      <div class="modal-row">
+        <label>每行时长（秒，仅在没有音频时生效）</label>
+        <input type="number" id="script-per-line" value="3" step="0.1" min="0.5" />
+      </div>
+      <div class="modal-row">
+        <label><input type="checkbox" id="script-replace-clips" checked /> 让图片片段平均铺满总时长</label>
+      </div>
+      <div class="modal-actions">
+        <button id="modal-cancel">取消</button>
+        <button id="modal-apply" class="primary">应用</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="export-overlay" class="overlay hidden">
+    <div class="overlay-card">
+      <div id="export-status">正在导出 0%</div>
+      <div class="bar"><div id="export-bar"></div></div>
+      <button id="export-cancel" class="danger">取消</button>
+    </div>
+  </div>
+
+  <div id="dropzone" class="dropzone hidden">拖到这里：图片或音频</div>
 
   <script src="app.js"></script>
 </body>
