@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>图文混剪</title>
   <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -61,11 +62,37 @@
 
   <div id="modal" class="modal hidden">
     <div class="modal-card">
-      <div class="modal-title">粘贴文案 · 一键对齐</div>
-      <p class="hint">每一行 = 一张图片对应的一句文案。如果上传了音频，将均分音频时长；否则每行默认 3 秒。</p>
-      <textarea id="script-text" placeholder="第一句解说...&#10;第二句解说...&#10;第三句解说..."></textarea>
+      <div class="modal-title">文案对齐</div>
+
+      <div class="tabs">
+        <div class="tab active" data-tab="paste">粘贴文字</div>
+        <div class="tab" data-tab="table">导入表格</div>
+      </div>
+
+      <div class="tab-panel" data-panel="paste">
+        <p class="hint">每一行 = 一句字幕。系统会均分到音频时长（无音频则按"每行时长"）。</p>
+        <textarea id="script-text" placeholder="第一句解说...&#10;第二句解说...&#10;第三句解说..."></textarea>
+        <div class="modal-row">
+          <label><input type="checkbox" id="script-auto-split" /> 整段粘贴时按标点自动切句（。！？；）</label>
+        </div>
+      </div>
+
+      <div class="tab-panel hidden" data-panel="table">
+        <p class="hint">支持 .csv / .xlsx / .xls。第一行视为表头，选择"文案列"即可。</p>
+        <div class="modal-row">
+          <input type="file" id="table-file" accept=".csv,.xlsx,.xls,.tsv" />
+        </div>
+        <div id="table-pick" class="hidden">
+          <div class="modal-row">
+            <label>文案列</label>
+            <select id="table-col"></select>
+          </div>
+          <div id="table-preview" class="table-preview"></div>
+        </div>
+      </div>
+
       <div class="modal-row">
-        <label>每行时长（秒，仅在没有音频时生效）</label>
+        <label>每行时长（秒，无音频时生效）</label>
         <input type="number" id="script-per-line" value="3" step="0.1" min="0.5" />
       </div>
       <div class="modal-row">

@@ -98,7 +98,7 @@ function loadImageFile(file) {
       state.clips.push({
         id: uid(), imageId: id,
         duration: 3, pan: 'right',
-        transition: 'fade', transitionDuration: 0.5,
+        transition: 'book', transitionDuration: 0.6,
       });
       rebuild();
     };
@@ -142,22 +142,139 @@ window.addEventListener('drop', (e) => {
 });
 
 // ---------- Script modal ----------
+let tableLines = []; // imported from CSV/XLSX, current selected column
+
 function openScriptModal() {
   $('#script-text').value = state.subtitles.map(s => s.text).join('\n');
   $('#modal').classList.remove('hidden');
+  setTab('paste');
 }
+function setTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
+}
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => setTab(t.dataset.tab));
+
 $('#modal-cancel').onclick = () => $('#modal').classList.add('hidden');
 $('#modal-apply').onclick = () => {
-  const text = $('#script-text').value;
+  const activeTab = document.querySelector('.tab.active').dataset.tab;
   const perLine = parseFloat($('#script-per-line').value) || 3;
   const replace = $('#script-replace-clips').checked;
-  applyScript(text, perLine, replace);
+  let lines = [];
+  if (activeTab === 'paste') {
+    let text = $('#script-text').value;
+    if ($('#script-auto-split').checked) {
+      lines = splitByPunctuation(text);
+    } else {
+      lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    }
+  } else {
+    lines = tableLines.slice();
+  }
+  if (lines.length === 0) { alert('没有可用的文案行'); return; }
+  applyLines(lines, perLine, replace);
   $('#modal').classList.add('hidden');
 };
 
-function applyScript(text, perLine, redistributeClips) {
-  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  if (lines.length === 0) return;
+function splitByPunctuation(text) {
+  const cleaned = text.replace(/\s+/g, '');
+  const parts = cleaned.split(/(?<=[。！？；!?;])/);
+  return parts.map(s => s.trim()).filter(Boolean);
+}
+
+// ---------- Table import ----------
+let tableRows = [];
+let tableHeaders = [];
+
+$('#table-file').onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    const ext = f.name.toLowerCase().split('.').pop();
+    if (ext === 'csv' || ext === 'tsv') {
+      const text = await f.text();
+      const sep = ext === 'tsv' ? '\t' : ',';
+      tableRows = parseDelimited(text, sep);
+    } else {
+      if (typeof XLSX === 'undefined') {
+        alert('Excel 解析库未加载（需要联网）。请先把表格在 Excel/WPS 中"另存为 CSV"再上传。');
+        return;
+      }
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      tableRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+    }
+    if (tableRows.length < 2) { alert('表格内容为空'); return; }
+    tableHeaders = tableRows[0].map((h, i) => String(h || `列${i+1}`));
+    populateColumnPicker();
+    $('#table-pick').classList.remove('hidden');
+  } catch (err) {
+    alert('解析失败：' + err.message);
+  }
+};
+
+function populateColumnPicker() {
+  const sel = $('#table-col');
+  sel.innerHTML = '';
+  tableHeaders.forEach((h, i) => {
+    const o = document.createElement('option');
+    o.value = String(i); o.textContent = h;
+    sel.appendChild(o);
+  });
+  // Auto-pick the column whose header matches common subtitle names
+  const prefer = ['原句','文案','字幕','台词','句子','文字','文本'];
+  let picked = 0;
+  for (let i = 0; i < tableHeaders.length; i++) {
+    if (prefer.some(p => tableHeaders[i].includes(p))) { picked = i; break; }
+  }
+  sel.value = String(picked);
+  sel.onchange = updateTablePreview;
+  updateTablePreview();
+}
+function updateTablePreview() {
+  const idx = parseInt($('#table-col').value, 10) || 0;
+  tableLines = tableRows.slice(1)
+    .map(r => String(r[idx] || '').trim())
+    .filter(Boolean);
+  const prev = $('#table-preview');
+  prev.innerHTML = '';
+  tableLines.slice(0, 6).forEach((t, i) => {
+    const d = document.createElement('div');
+    d.textContent = `${i + 1}. ${t}`;
+    prev.appendChild(d);
+  });
+  if (tableLines.length > 6) {
+    const d = document.createElement('div');
+    d.textContent = `… 共 ${tableLines.length} 行`;
+    prev.appendChild(d);
+  }
+}
+
+function parseDelimited(text, sep) {
+  // Strip BOM
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rows = []; let row = [], field = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') q = false;
+      else field += c;
+    } else {
+      if (c === '"') q = true;
+      else if (c === sep) { row.push(field); field = ''; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        row.push(field); rows.push(row); row = []; field = '';
+      } else field += c;
+    }
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function applyLines(lines, perLine, redistributeClips) {
   const total = state.audio?.duration || (lines.length * perLine);
   const seg = total / lines.length;
   state.subtitles = lines.map((t, i) => ({
@@ -297,6 +414,40 @@ function applyTransition(prevImg, prevPan, prevProg, newImg, newPan, newProg, ty
         drawClipPan(newImg, newPan, newProg); ctx.restore();
       }
       break;
+    case 'book': {
+      // Realistic book page peel: old page peels from right edge to left,
+      // revealing new page underneath, with curl shading and drop shadow.
+      drawClipPan(newImg, newPan, newProg);
+      const foldX = W * (1 - tp);
+
+      // Old page clipped to left of fold
+      ctx.save();
+      ctx.beginPath(); ctx.rect(0, 0, foldX, H); ctx.clip();
+      drawClipPan(prevImg, prevPan, prevProg);
+      // Curl darkening on the trailing edge of old page
+      const curlW = Math.min(80, Math.max(20, foldX * 0.35));
+      const g1 = ctx.createLinearGradient(foldX - curlW, 0, foldX, 0);
+      g1.addColorStop(0, 'rgba(0,0,0,0)');
+      g1.addColorStop(0.7, 'rgba(0,0,0,0.25)');
+      g1.addColorStop(1, 'rgba(0,0,0,0.55)');
+      ctx.fillStyle = g1;
+      ctx.fillRect(foldX - curlW, 0, curlW, H);
+      ctx.restore();
+
+      // Drop shadow on new page just past the fold
+      const shW = Math.min(120, Math.max(30, (W - foldX) * 0.4));
+      const g2 = ctx.createLinearGradient(foldX, 0, foldX + shW, 0);
+      g2.addColorStop(0, 'rgba(0,0,0,0.55)');
+      g2.addColorStop(0.4, 'rgba(0,0,0,0.18)');
+      g2.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g2;
+      ctx.fillRect(foldX, 0, shW, H);
+
+      // Bright spine line at fold
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fillRect(foldX - 1, 0, 2, H);
+      break;
+    }
     default:
       drawClipPan(newImg, newPan, newProg);
   }
@@ -530,7 +681,8 @@ function buildInspector() {
       ['zoom-in','放大'],['zoom-out','缩小'],
     ], v => { clip.pan = v; rebuild(); })));
     inspectorBody.appendChild(row('入场过渡', selectInput(clip.transition, [
-      ['none','直切'],['fade','淡入'],['slide-left','左滑'],['slide-right','右滑'],['flip','翻页'],
+      ['none','直切'],['fade','淡入'],['slide-left','左滑'],['slide-right','右滑'],
+      ['book','仿真翻书'],['flip','翻转'],
     ], v => { clip.transition = v; rebuild(); })));
     inspectorBody.appendChild(row('过渡时长', numInput(clip.transitionDuration, 0.05, v => { clip.transitionDuration = Math.max(0, v); rebuild(); })));
     inspectorBody.appendChild(buttonRow([

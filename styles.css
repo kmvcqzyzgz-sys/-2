@@ -198,6 +198,24 @@ button.primary-soft:hover { background: #354868; }
 }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.tab {
+  padding: 6px 12px; cursor: pointer; font-size: 12px;
+  color: var(--muted); border-bottom: 2px solid transparent;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab-panel.hidden { display: none; }
+.tab-panel { display: flex; flex-direction: column; gap: 8px; }
+.table-preview {
+  margin-top: 6px; max-height: 120px; overflow: auto;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 6px 8px;
+  font-size: 12px; color: var(--muted);
+}
+.table-preview div { padding: 2px 0; border-bottom: 1px dashed #333; }
+.table-preview div:last-child { border-bottom: 0; }
+input[type="file"] { color: var(--text); font-size: 12px; }
+
 /* Export overlay */
 .overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.7);
