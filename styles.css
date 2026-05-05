@@ -220,6 +220,12 @@ button.primary-soft:hover { background: #354868; }
 .table-preview div { padding: 2px 0; border-bottom: 1px dashed #333; }
 .table-preview div:last-child { border-bottom: 0; }
 input[type="file"] { color: var(--text); font-size: 12px; }
+kbd {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-bottom-width: 2px; padding: 1px 6px;
+  border-radius: 3px; font-family: ui-monospace, monospace;
+  font-size: 11px; color: var(--text);
+}
 
 /* Export overlay */
 .overlay {

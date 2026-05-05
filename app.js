@@ -97,7 +97,7 @@ function loadImageFile(file) {
       state.images.push({ id, name: file.name, img, dataUrl: reader.result });
       state.clips.push({
         id: uid(), imageId: id,
-        duration: 3, pan: 'right',
+        duration: 3, pan: 'none',
         transition: 'book', transitionDuration: 0.6,
       });
       rebuild();
@@ -374,39 +374,67 @@ function loadProject(file) {
 }
 
 // ---------- Render ----------
+// Pan modes never crop the perpendicular axis:
+// - left/right pans fit by HEIGHT (no top/bottom crop). If the height-fit
+//   image is wider than canvas (landscape source), pan inside that natural
+//   overflow. If image is same/narrower than canvas, slide laterally with
+//   side letterbox so motion is still visible without losing any pixels.
+// - up/down pans symmetric.
+// - zoom uses fit-contain then a small uniform scale.
+// - none = fit-contain, no motion.
 function drawClipPan(img, panType, progress, target = ctx) {
   const W = canvas.width, H = canvas.height;
   const ir = img.width / img.height;
   const cr = W / H;
-  let baseW, baseH;
-  if (ir > cr) { baseH = H; baseW = H * ir; }
-  else { baseW = W; baseH = W / ir; }
-
-  const overscan = 1.10;
-  let dw = baseW * overscan, dh = baseH * overscan;
-  let dx = (W - dw) / 2, dy = (H - dh) / 2;
-
   const p = Math.max(0, Math.min(1, progress));
+
+  let dw, dh, dx, dy;
+
   switch (panType) {
-    case 'left':  dx = (W - dw) * p; break;
-    case 'right': dx = (W - dw) * (1 - p); break;
-    case 'up':    dy = (H - dh) * p; break;
-    case 'down':  dy = (H - dh) * (1 - p); break;
-    case 'zoom-in': {
-      const s = 1 + 0.18 * p;
-      dw = baseW * s; dh = baseH * s;
-      dx = (W - dw) / 2; dy = (H - dh) / 2;
+    case 'left':
+    case 'right': {
+      dh = H; dw = H * ir; dy = 0;
+      if (dw > W + 0.5) {
+        dx = (panType === 'left') ? (W - dw) * p : (W - dw) * (1 - p);
+      } else {
+        const slack = W * 0.10;
+        const baseDx = (W - dw) / 2;
+        dx = (panType === 'right')
+          ? baseDx + slack - 2 * slack * p
+          : baseDx - slack + 2 * slack * p;
+      }
       break;
     }
+    case 'up':
+    case 'down': {
+      dw = W; dh = W / ir; dx = 0;
+      if (dh > H + 0.5) {
+        dy = (panType === 'up') ? (H - dh) * p : (H - dh) * (1 - p);
+      } else {
+        const slack = H * 0.10;
+        const baseDy = (H - dh) / 2;
+        dy = (panType === 'down')
+          ? baseDy + slack - 2 * slack * p
+          : baseDy - slack + 2 * slack * p;
+      }
+      break;
+    }
+    case 'zoom-in':
     case 'zoom-out': {
-      const s = 1.18 - 0.18 * p;
+      let baseW, baseH;
+      if (ir > cr) { baseW = W; baseH = W / ir; }
+      else         { baseH = H; baseW = H * ir; }
+      const s = panType === 'zoom-in' ? (1 + 0.10 * p) : (1.10 - 0.10 * p);
       dw = baseW * s; dh = baseH * s;
       dx = (W - dw) / 2; dy = (H - dh) / 2;
       break;
     }
-    case 'none': default:
-      dw = baseW; dh = baseH;
+    case 'none':
+    default: {
+      if (ir > cr) { dw = W; dh = W / ir; }
+      else         { dh = H; dw = H * ir; }
       dx = (W - dw) / 2; dy = (H - dh) / 2;
+    }
   }
   target.drawImage(img, dx, dy, dw, dh);
 }
@@ -728,7 +756,11 @@ function buildInspector() {
     inspectorBody.appendChild(sectionTitle(`图片片段 ${idx + 1}`));
     inspectorBody.appendChild(row('时长（秒）', numInput(clip.duration, 0.1, v => { clip.duration = Math.max(0.1, v); rebuild(); })));
     inspectorBody.appendChild(row('平移效果', selectInput(clip.pan, [
-      ['none','无'],['left','向左'],['right','向右'],['up','向上'],['down','向下'],
+      ['none','无（完整显示）'],
+      ['left','向左（不裁上下）'],
+      ['right','向右（不裁上下）'],
+      ['up','向上（不裁左右）'],
+      ['down','向下（不裁左右）'],
       ['zoom-in','放大'],['zoom-out','缩小'],
     ], v => { clip.pan = v; rebuild(); })));
     inspectorBody.appendChild(row('入场过渡', selectInput(clip.transition, [
@@ -1020,12 +1052,17 @@ async function exportVideo() {
   }
 
   const mimeCandidates = [
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    'video/mp4;codecs=avc1.640028,mp4a.40.2',
+    'video/mp4;codecs=h264,aac',
+    'video/mp4',
     'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
     'video/webm',
   ];
   const mime = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
-  const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
+  const ext = mime.startsWith('video/mp4') ? 'mp4' : 'webm';
+  const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
   const chunks = [];
   recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
@@ -1034,8 +1071,11 @@ async function exportVideo() {
       const blob = new Blob(chunks, { type: mime });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'export.webm';
+      a.download = `export.${ext}`;
       a.click();
+      if (ext !== 'mp4') {
+        setTimeout(() => alert('当前浏览器不支持直接导出 MP4，已导出为 WebM。\nAndroid 多数可直接播；iPhone 不支持 WebM，请用剪映/醒图等导入再导出，或在线工具转 MP4。\n建议使用最新版 Chrome / Edge 可直接导出 MP4。'), 100);
+      }
       resolve();
     };
   });
@@ -1070,6 +1110,78 @@ function setExportProgress(p, label) {
   $('#export-bar').style.width = `${Math.min(100, Math.max(0, p * 100))}%`;
   $('#export-status').textContent = label;
 }
+
+// ---------- Calibration (tap-to-sync subtitles to audio) ----------
+let calibrationState = null;
+
+$('#btn-calibrate').onclick = startCalibration;
+$('#cal-cancel').onclick = cancelCalibration;
+$('#cal-finish').onclick = finishCalibration;
+
+function startCalibration() {
+  if (state.subtitles.length === 0) { alert('请先用 📝 粘文案 添加字幕'); return; }
+  if (!state.audio) { alert('请先上传配音音频'); return; }
+  // First subtitle assumed to start at 0; user marks the start of each
+  // subsequent subtitle by pressing space while listening.
+  calibrationState = { idx: 0, marks: [0] };
+  $('#calibration').classList.remove('hidden');
+  updateCalibrationOverlay();
+  pause();
+  setCurrentTime(0);
+  play();
+}
+function calibrationMark() {
+  if (!calibrationState) return;
+  const next = calibrationState.idx + 1;
+  if (next >= state.subtitles.length) { finishCalibration(); return; }
+  calibrationState.marks.push(state.currentTime);
+  calibrationState.idx = next;
+  updateCalibrationOverlay();
+}
+function updateCalibrationOverlay() {
+  const cur = calibrationState.idx;
+  const total = state.subtitles.length;
+  $('#cal-progress').textContent = `当前：第 ${cur + 1} / ${total} 句`;
+  if (cur < total - 1) {
+    $('#cal-line').textContent = `下一句：${state.subtitles[cur + 1].text}`;
+  } else {
+    $('#cal-line').textContent = '最后一句正在播放，结束时按"完成"。';
+  }
+}
+function finishCalibration() {
+  if (!calibrationState) return;
+  pause();
+  while (calibrationState.marks.length < state.subtitles.length) {
+    calibrationState.marks.push(state.audio?.duration || state.currentTime);
+  }
+  const marks = calibrationState.marks;
+  const n = state.subtitles.length;
+  for (let i = 0; i < n; i++) {
+    state.subtitles[i].start = marks[i];
+    const next = i < n - 1 ? marks[i + 1] : (state.audio?.duration || marks[i] + 3);
+    state.subtitles[i].end = Math.max(marks[i] + 0.2, next - 0.05);
+  }
+  calibrationState = null;
+  $('#calibration').classList.add('hidden');
+  if (state.clips.length > 0 && confirm('字幕时间已更新。是否同时让图片翻页时长对齐字幕？')) {
+    alignClipsToSubtitles();
+  }
+  rebuild();
+}
+function cancelCalibration() {
+  pause();
+  calibrationState = null;
+  $('#calibration').classList.add('hidden');
+}
+document.addEventListener('keydown', (e) => {
+  if (!calibrationState) return;
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    calibrationMark();
+  } else if (e.key === 'Escape') {
+    cancelCalibration();
+  }
+});
 
 // ---------- Init ----------
 window.addEventListener('resize', rebuild);

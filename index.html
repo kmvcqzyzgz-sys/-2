@@ -15,9 +15,10 @@
       <button id="btn-add-audio">+ 音频</button>
       <button id="btn-add-subtitle">+ 字幕</button>
       <button id="btn-script" class="primary-soft">📝 粘文案</button>
+      <button id="btn-calibrate" class="primary-soft">🎯 跟读校准</button>
       <button id="btn-save">保存</button>
       <button id="btn-load">加载</button>
-      <button id="btn-export" class="primary">导出 WebM</button>
+      <button id="btn-export" class="primary">导出视频</button>
     </div>
     <input type="file" id="file-images" accept="image/*" multiple hidden />
     <input type="file" id="file-audio" accept="audio/*" hidden />
@@ -118,6 +119,19 @@
   </div>
 
   <div id="dropzone" class="dropzone hidden">拖到这里：图片或音频</div>
+
+  <div id="calibration" class="overlay hidden">
+    <div class="overlay-card" style="width: 420px;">
+      <div style="font-weight: 600;">🎯 跟读校准</div>
+      <div id="cal-progress" style="color: var(--muted); font-size: 12px;">准备中...</div>
+      <div id="cal-line" style="background: var(--panel-2); padding: 10px; border-radius: 4px; min-height: 40px;"></div>
+      <p class="hint" style="margin: 0;">听到下一句开头时，按 <kbd>空格</kbd> 标记。<kbd>Esc</kbd> 取消。</p>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button id="cal-cancel">取消</button>
+        <button id="cal-finish" class="primary">完成</button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>
