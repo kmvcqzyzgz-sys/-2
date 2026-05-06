@@ -97,7 +97,7 @@ function loadImageFile(file) {
       state.images.push({ id, name: file.name, img, dataUrl: reader.result });
       state.clips.push({
         id: uid(), imageId: id,
-        duration: 3, pan: 'none',
+        duration: 3, pan: 'right',
         transition: 'book', transitionDuration: 0.6,
       });
       rebuild();
@@ -397,16 +397,16 @@ function drawClipPan(img, panType, progress, target = ctx) {
       if (fitDw > W + 0.5) {
         // Image naturally wider: pan within natural overflow, no crop.
         dh = H; dw = fitDw; dy = 0;
-        dx = (panType === 'left') ? (W - dw) * p : (W - dw) * (1 - p);
+        // 'right' = camera pans right: start showing LEFT side of image,
+        // end showing RIGHT side (image shifts leftward over time).
+        dx = (panType === 'right') ? (W - dw) * p : (W - dw) * (1 - p);
       } else {
-        // Same/narrower: cover-fit + uniform overscan so pan has room.
-        // Slight uniform crop, but no black bars.
         let baseW, baseH;
         if (ir > cr) { baseH = H; baseW = H * ir; }
         else         { baseW = W; baseH = W / ir; }
         const overscan = 1.12;
         dw = baseW * overscan; dh = baseH * overscan;
-        dx = (panType === 'left') ? (W - dw) * p : (W - dw) * (1 - p);
+        dx = (panType === 'right') ? (W - dw) * p : (W - dw) * (1 - p);
         dy = (H - dh) / 2;
       }
       break;
@@ -416,14 +416,15 @@ function drawClipPan(img, panType, progress, target = ctx) {
       const fitDh = W / ir;
       if (fitDh > H + 0.5) {
         dw = W; dh = fitDh; dx = 0;
-        dy = (panType === 'up') ? (H - dh) * p : (H - dh) * (1 - p);
+        // 'down' = camera pans down: start showing TOP, end showing BOTTOM.
+        dy = (panType === 'down') ? (H - dh) * p : (H - dh) * (1 - p);
       } else {
         let baseW, baseH;
         if (ir > cr) { baseH = H; baseW = H * ir; }
         else         { baseW = W; baseH = W / ir; }
         const overscan = 1.12;
         dw = baseW * overscan; dh = baseH * overscan;
-        dy = (panType === 'up') ? (H - dh) * p : (H - dh) * (1 - p);
+        dy = (panType === 'down') ? (H - dh) * p : (H - dh) * (1 - p);
         dx = (W - dw) / 2;
       }
       break;
@@ -1233,45 +1234,39 @@ $('#btn-auto-calibrate').onclick = autoCalibrate;
 async function autoCalibrate() {
   if (state.subtitles.length === 0) { alert('请先用 📝 粘文案 添加字幕'); return; }
   if (!state.audio) { alert('请先上传配音音频'); return; }
+  if (state.subtitles.length === 1) {
+    state.subtitles[0].start = 0;
+    state.subtitles[0].end = state.audio.duration;
+    rebuild(); return;
+  }
 
   $('#export-overlay').classList.remove('hidden');
-  setExportProgress(0.05, '解码音频中...');
+  setExportProgress(0.1, '解码音频...');
   try {
     const ac = new (window.AudioContext || window.webkitAudioContext)();
-    const resp = await fetch(state.audio.dataUrl);
-    const buf = await resp.arrayBuffer();
+    const buf = await fetch(state.audio.dataUrl).then(r => r.arrayBuffer());
     const audioBuf = await ac.decodeAudioData(buf);
     ac.close().catch(() => {});
 
-    setExportProgress(0.5, '检测语音段...');
-    await new Promise(r => setTimeout(r, 16)); // let UI repaint
-    let segments = detectSpeechSegments(audioBuf);
-
-    const n = state.subtitles.length;
-    setExportProgress(0.8, `匹配 ${segments.length} 段语音 → ${n} 句字幕...`);
+    setExportProgress(0.5, '分析能量曲线...');
     await new Promise(r => setTimeout(r, 16));
 
-    if (segments.length === 0) {
+    const result = analyzeAudioForSubtitles(audioBuf, state.subtitles);
+    if (!result) {
       $('#export-overlay').classList.add('hidden');
-      alert('未检测到清晰的语音段，建议改用 🎯 跟读校准。');
+      alert('停顿数太少，无法切分。建议改用 🎯 跟读校准。');
       return;
     }
-    if (segments.length > n) segments = mergeShortGaps(segments, n);
-    else if (segments.length < n) segments = subdivideLongSegments(segments, n);
 
-    if (segments.length !== n) {
-      $('#export-overlay').classList.add('hidden');
-      alert(`匹配失败（${segments.length} ≠ ${n}）。建议改用 🎯 跟读校准。`);
-      return;
-    }
+    const n = state.subtitles.length;
     for (let i = 0; i < n; i++) {
-      state.subtitles[i].start = Math.max(0, segments[i].start - 0.05);
-      state.subtitles[i].end   = segments[i].end + 0.15;
+      state.subtitles[i].start = result.starts[i];
+      state.subtitles[i].end = result.ends[i];
     }
     setExportProgress(1, '完成');
     setTimeout(() => {
       $('#export-overlay').classList.add('hidden');
-      if (state.clips.length > 0 && confirm('字幕时间已自动对齐音频。是否同步对齐图片翻页时长？')) {
+      if (state.clips.length > 0 && confirm('字幕已对齐。同步对齐图片翻页时长？')) {
         alignClipsToSubtitles();
       }
       rebuild();
@@ -1282,96 +1277,117 @@ async function autoCalibrate() {
   }
 }
 
-function detectSpeechSegments(audioBuf) {
-  // Mix to mono, compute RMS energy per 30ms window, adaptive threshold.
+// Strategy:
+//   1. Compute RMS energy per 20ms window.
+//   2. Threshold = midpoint between 25th and 75th percentile (robust split).
+//   3. Find ALL silence gaps (runs below threshold).
+//   4. Compute char-proportional ideal boundary positions for the (n-1)
+//      between-subtitle splits.
+//   5. Greedy-snap each ideal boundary to the closest unused gap, with
+//      a small bias toward longer (more confident) gaps.
+//   6. Apply boundaries; first subtitle anchors to first speech onset,
+//      last to last speech offset.
+function analyzeAudioForSubtitles(audioBuf, subtitles) {
   const sr = audioBuf.sampleRate;
-  const numCh = audioBuf.numberOfChannels;
-  const len = audioBuf.length;
-  const winMs = 30;
+  const winMs = 20;
   const winSize = Math.floor(sr * winMs / 1000);
-  const energies = new Float32Array(Math.ceil(len / winSize));
+  const len = audioBuf.length;
+  const numCh = audioBuf.numberOfChannels;
   const ch0 = audioBuf.getChannelData(0);
   const ch1 = numCh > 1 ? audioBuf.getChannelData(1) : null;
 
-  let wi = 0;
-  for (let i = 0; i < len; i += winSize) {
+  const numWin = Math.floor(len / winSize);
+  const energies = new Float32Array(numWin);
+  for (let w = 0; w < numWin; w++) {
     let sum = 0;
-    const end = Math.min(i + winSize, len);
-    if (ch1) for (let j = i; j < end; j++) { const s = (ch0[j] + ch1[j]) * 0.5; sum += s * s; }
-    else     for (let j = i; j < end; j++) { const s = ch0[j]; sum += s * s; }
-    energies[wi++] = Math.sqrt(sum / Math.max(1, end - i));
+    const a = w * winSize, b = a + winSize;
+    if (ch1) for (let j = a; j < b; j++) { const s = (ch0[j] + ch1[j]) * 0.5; sum += s * s; }
+    else     for (let j = a; j < b; j++) { const s = ch0[j]; sum += s * s; }
+    energies[w] = Math.sqrt(sum / winSize);
   }
 
-  // Adaptive threshold from energy distribution.
-  const sorted = Array.from(energies).sort((a, b) => a - b);
-  const noiseFloor = sorted[Math.floor(sorted.length * 0.20)] || 0;
-  const peak = sorted[Math.floor(sorted.length * 0.90)] || 1;
-  const threshold = noiseFloor + Math.max(0.005, (peak - noiseFloor) * 0.18);
+  // Robust threshold: midpoint between 25th and 75th percentile of nonzero energies.
+  const nonzero = Array.from(energies).filter(e => e > 1e-6).sort((x, y) => x - y);
+  const pct = f => nonzero[Math.min(nonzero.length - 1, Math.floor(nonzero.length * f))] || 0;
+  const threshold = (pct(0.25) + pct(0.75)) / 2 || pct(0.50) * 1.1;
 
-  // 3-window majority smoothing.
-  const isVoice = new Uint8Array(energies.length);
-  for (let i = 0; i < energies.length; i++) {
+  // 3-tap majority smoothing of voice/silence flags
+  const voiced = new Uint8Array(numWin);
+  for (let i = 0; i < numWin; i++) {
     const a = energies[Math.max(0, i - 1)] > threshold ? 1 : 0;
     const b = energies[i] > threshold ? 1 : 0;
-    const c = energies[Math.min(energies.length - 1, i + 1)] > threshold ? 1 : 0;
-    isVoice[i] = (a + b + c) >= 2 ? 1 : 0;
+    const c = energies[Math.min(numWin - 1, i + 1)] > threshold ? 1 : 0;
+    voiced[i] = (a + b + c) >= 2 ? 1 : 0;
   }
 
-  const minSilenceWindows = Math.ceil(220 / winMs); // 220ms gap = sentence break
-  const minSpeechWindows  = Math.ceil(180 / winMs); // 180ms min for a real segment
-  const segments = [];
-  let inSpeech = false, segStart = 0, silenceCount = 0;
-  for (let i = 0; i < isVoice.length; i++) {
-    if (isVoice[i]) {
-      if (!inSpeech) { segStart = i; inSpeech = true; }
-      silenceCount = 0;
-    } else if (inSpeech) {
-      silenceCount++;
-      if (silenceCount >= minSilenceWindows) {
-        const segEnd = i - silenceCount;
-        if (segEnd - segStart >= minSpeechWindows) {
-          segments.push({ start: segStart * winMs / 1000, end: segEnd * winMs / 1000 });
-        }
-        inSpeech = false;
+  // Find first / last speech moments
+  let firstV = 0; while (firstV < numWin && !voiced[firstV]) firstV++;
+  let lastV = numWin - 1; while (lastV >= 0 && !voiced[lastV]) lastV--;
+  if (lastV <= firstV) return null;
+  const wToSec = winMs / 1000;
+  const firstSpeech = firstV * wToSec;
+  const lastSpeech = (lastV + 1) * wToSec;
+
+  // Find all silence gaps fully inside [firstSpeech, lastSpeech]
+  const gaps = [];
+  let inSil = !voiced[firstV];
+  let silStart = firstV;
+  for (let i = firstV; i <= lastV; i++) {
+    if (!voiced[i]) {
+      if (!inSil) { silStart = i; inSil = true; }
+    } else if (inSil) {
+      const dur = (i - silStart) * wToSec;
+      if (dur >= 0.10) {
+        gaps.push({ start: silStart * wToSec, end: i * wToSec, dur });
       }
+      inSil = false;
     }
   }
-  if (inSpeech) {
-    const segEnd = isVoice.length;
-    if (segEnd - segStart >= minSpeechWindows) {
-      segments.push({ start: segStart * winMs / 1000, end: segEnd * winMs / 1000 });
-    }
-  }
-  return segments;
-}
 
-function mergeShortGaps(segments, target) {
-  const segs = segments.map(s => ({ ...s }));
-  while (segs.length > target) {
-    let bestGap = Infinity, bestIdx = -1;
-    for (let i = 0; i < segs.length - 1; i++) {
-      const gap = segs[i + 1].start - segs[i].end;
-      if (gap < bestGap) { bestGap = gap; bestIdx = i; }
-    }
-    if (bestIdx < 0) break;
-    segs[bestIdx].end = segs[bestIdx + 1].end;
-    segs.splice(bestIdx + 1, 1);
+  const n = subtitles.length;
+  if (gaps.length < n - 1) return null;
+
+  // Char-proportional ideal boundaries
+  const charCounts = subtitles.map(s => Math.max(1, (s.text || '').length));
+  const totalChars = charCounts.reduce((a, b) => a + b, 0);
+  const ideals = [];
+  let acc = 0;
+  for (let i = 0; i < n - 1; i++) {
+    acc += charCounts[i];
+    ideals.push(firstSpeech + (acc / totalChars) * (lastSpeech - firstSpeech));
   }
-  return segs;
-}
-function subdivideLongSegments(segments, target) {
-  // Split the longest segments evenly until we hit target count.
-  const segs = segments.map(s => ({ ...s }));
-  while (segs.length < target) {
-    let longestIdx = 0;
-    for (let i = 1; i < segs.length; i++) {
-      if (segs[i].end - segs[i].start > segs[longestIdx].end - segs[longestIdx].start) longestIdx = i;
+
+  // Greedy snap each ideal to closest unused gap; longer gaps get a small bonus.
+  const used = new Set();
+  const audioSpan = lastSpeech - firstSpeech;
+  const boundaries = ideals.map(idealT => {
+    let bestI = -1, bestScore = Infinity;
+    for (let i = 0; i < gaps.length; i++) {
+      if (used.has(i)) continue;
+      const g = gaps[i];
+      const center = (g.start + g.end) / 2;
+      const dist = Math.abs(center - idealT);
+      const lenBonus = Math.min(g.dur, 0.6) * audioSpan * 0.05; // small preference for longer gaps
+      const score = dist - lenBonus;
+      if (score < bestScore) { bestScore = score; bestI = i; }
     }
-    const s = segs[longestIdx];
-    const mid = (s.start + s.end) / 2;
-    segs.splice(longestIdx, 1, { start: s.start, end: mid }, { start: mid, end: s.end });
+    if (bestI >= 0) {
+      used.add(bestI);
+      const g = gaps[bestI];
+      return (g.start + g.end) / 2;
+    }
+    return idealT;
+  });
+  boundaries.sort((a, b) => a - b);
+
+  const starts = [], ends = [];
+  for (let i = 0; i < n; i++) {
+    const start = i === 0 ? Math.max(0, firstSpeech - 0.05) : boundaries[i - 1];
+    const endRaw = i === n - 1 ? Math.min(audioBuf.duration, lastSpeech + 0.15) : (boundaries[i] - 0.04);
+    starts.push(start);
+    ends.push(Math.max(start + 0.2, endRaw));
   }
-  return segs;
+  return { starts, ends };
 }
 
 // ---------- Init ----------
