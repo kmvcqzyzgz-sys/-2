@@ -393,29 +393,38 @@ function drawClipPan(img, panType, progress, target = ctx) {
   switch (panType) {
     case 'left':
     case 'right': {
-      dh = H; dw = H * ir; dy = 0;
-      if (dw > W + 0.5) {
+      const fitDw = H * ir;
+      if (fitDw > W + 0.5) {
+        // Image naturally wider: pan within natural overflow, no crop.
+        dh = H; dw = fitDw; dy = 0;
         dx = (panType === 'left') ? (W - dw) * p : (W - dw) * (1 - p);
       } else {
-        const slack = W * 0.10;
-        const baseDx = (W - dw) / 2;
-        dx = (panType === 'right')
-          ? baseDx + slack - 2 * slack * p
-          : baseDx - slack + 2 * slack * p;
+        // Same/narrower: cover-fit + uniform overscan so pan has room.
+        // Slight uniform crop, but no black bars.
+        let baseW, baseH;
+        if (ir > cr) { baseH = H; baseW = H * ir; }
+        else         { baseW = W; baseH = W / ir; }
+        const overscan = 1.12;
+        dw = baseW * overscan; dh = baseH * overscan;
+        dx = (panType === 'left') ? (W - dw) * p : (W - dw) * (1 - p);
+        dy = (H - dh) / 2;
       }
       break;
     }
     case 'up':
     case 'down': {
-      dw = W; dh = W / ir; dx = 0;
-      if (dh > H + 0.5) {
+      const fitDh = W / ir;
+      if (fitDh > H + 0.5) {
+        dw = W; dh = fitDh; dx = 0;
         dy = (panType === 'up') ? (H - dh) * p : (H - dh) * (1 - p);
       } else {
-        const slack = H * 0.10;
-        const baseDy = (H - dh) / 2;
-        dy = (panType === 'down')
-          ? baseDy + slack - 2 * slack * p
-          : baseDy - slack + 2 * slack * p;
+        let baseW, baseH;
+        if (ir > cr) { baseH = H; baseW = H * ir; }
+        else         { baseW = W; baseH = W / ir; }
+        const overscan = 1.12;
+        dw = baseW * overscan; dh = baseH * overscan;
+        dy = (panType === 'up') ? (H - dh) * p : (H - dh) * (1 - p);
+        dx = (W - dw) / 2;
       }
       break;
     }
@@ -440,13 +449,21 @@ function drawClipPan(img, panType, progress, target = ctx) {
 }
 
 const offscreen = document.createElement('canvas');
+const offCache = { img: null, pan: null, prog: -1, w: 0, h: 0 };
 function panToOffscreen(img, panType, progress) {
+  if (offCache.img === img && offCache.pan === panType
+      && Math.abs(offCache.prog - progress) < 0.005
+      && offCache.w === canvas.width && offCache.h === canvas.height) {
+    return offscreen;
+  }
   if (offscreen.width !== canvas.width) offscreen.width = canvas.width;
   if (offscreen.height !== canvas.height) offscreen.height = canvas.height;
   const oc = offscreen.getContext('2d');
   oc.fillStyle = '#000';
   oc.fillRect(0, 0, canvas.width, canvas.height);
   drawClipPan(img, panType, progress, oc);
+  offCache.img = img; offCache.pan = panType; offCache.prog = progress;
+  offCache.w = canvas.width; offCache.h = canvas.height;
   return offscreen;
 }
 function applyTransition(prevImg, prevPan, prevProg, newImg, newPan, newProg, type, tp) {
@@ -632,8 +649,33 @@ function render() {
   if (sub) drawSubtitle(sub.text);
 }
 
+// ---------- Rebuild scheduling ----------
+let _rafToken = null; // 'soft' | 'full' | null
+function scheduleSoft() {
+  if (_rafToken) return;
+  _rafToken = 'soft';
+  requestAnimationFrame(_flushRebuild);
+}
+function scheduleFull() {
+  if (_rafToken === 'full') return;
+  if (_rafToken === 'soft') { _rafToken = 'full'; return; }
+  _rafToken = 'full';
+  requestAnimationFrame(_flushRebuild);
+}
+function _flushRebuild() {
+  const t = _rafToken; _rafToken = null;
+  if (t === 'full') rebuild();
+  else if (t === 'soft') softRebuild();
+}
+function softRebuild() { renderTimeline(); render(); }
+
 // ---------- Timeline ----------
 function rebuild() {
+  renderTimeline();
+  render();
+  buildInspector();
+}
+function renderTimeline() {
   const dur = totalDuration();
   const widthPx = Math.max(trackArea.clientWidth, dur * state.pxPerSec + 60);
   ruler.style.width = trackImages.style.width = trackSubs.style.width = trackAudio.style.width = widthPx + 'px';
@@ -707,8 +749,6 @@ function rebuild() {
   seek.value = state.currentTime.toFixed(2);
   updatePlayhead();
   updateTimeLabel();
-  buildInspector();
-  render();
 }
 function updatePlayhead() { playhead.style.left = (state.currentTime * state.pxPerSec) + 'px'; }
 function updateTimeLabel() { timeLabel.textContent = `${state.currentTime.toFixed(2)} / ${totalDuration().toFixed(2)}`; }
@@ -754,20 +794,20 @@ function buildInspector() {
     if (!clip) return;
     const idx = state.clips.indexOf(clip);
     inspectorBody.appendChild(sectionTitle(`图片片段 ${idx + 1}`));
-    inspectorBody.appendChild(row('时长（秒）', numInput(clip.duration, 0.1, v => { clip.duration = Math.max(0.1, v); rebuild(); })));
+    inspectorBody.appendChild(row('时长（秒）', numInput(clip.duration, 0.1, v => { clip.duration = Math.max(0.1, v); scheduleSoft(); })));
     inspectorBody.appendChild(row('平移效果', selectInput(clip.pan, [
       ['none','无（完整显示）'],
-      ['left','向左（不裁上下）'],
-      ['right','向右（不裁上下）'],
-      ['up','向上（不裁左右）'],
-      ['down','向下（不裁左右）'],
+      ['left','向左平移'],
+      ['right','向右平移'],
+      ['up','向上平移'],
+      ['down','向下平移'],
       ['zoom-in','放大'],['zoom-out','缩小'],
     ], v => { clip.pan = v; rebuild(); })));
     inspectorBody.appendChild(row('入场过渡', selectInput(clip.transition, [
       ['none','直切'],['fade','淡入'],['slide-left','左滑'],['slide-right','右滑'],
       ['book','仿真翻书'],['flip','翻转'],
     ], v => { clip.transition = v; rebuild(); })));
-    inspectorBody.appendChild(row('过渡时长', numInput(clip.transitionDuration, 0.05, v => { clip.transitionDuration = Math.max(0, v); rebuild(); })));
+    inspectorBody.appendChild(row('过渡时长', numInput(clip.transitionDuration, 0.05, v => { clip.transitionDuration = Math.max(0, v); scheduleSoft(); })));
     inspectorBody.appendChild(buttonRow([
       ['上移', () => moveClip(clip.id, -1)],
       ['下移', () => moveClip(clip.id, +1)],
@@ -784,9 +824,9 @@ function buildInspector() {
     const sub = state.subtitles.find(s => s.id === sel.id);
     if (!sub) return;
     inspectorBody.appendChild(sectionTitle('字幕'));
-    inspectorBody.appendChild(row('文案', textArea(sub.text, v => { sub.text = v; rebuild(); })));
-    inspectorBody.appendChild(row('开始（秒）', numInput(sub.start, 0.1, v => { sub.start = Math.max(0, v); if (sub.end <= sub.start) sub.end = sub.start + 0.5; rebuild(); })));
-    inspectorBody.appendChild(row('结束（秒）', numInput(sub.end, 0.1, v => { sub.end = Math.max(sub.start + 0.1, v); rebuild(); })));
+    inspectorBody.appendChild(row('文案', textArea(sub.text, v => { sub.text = v; scheduleSoft(); })));
+    inspectorBody.appendChild(row('开始（秒）', numInput(sub.start, 0.1, v => { sub.start = Math.max(0, v); if (sub.end <= sub.start) sub.end = sub.start + 0.5; scheduleSoft(); })));
+    inspectorBody.appendChild(row('结束（秒）', numInput(sub.end, 0.1, v => { sub.end = Math.max(sub.start + 0.1, v); scheduleSoft(); })));
     inspectorBody.appendChild(dangerButton('删除字幕', () => {
       state.subtitles = state.subtitles.filter(s => s.id !== sub.id);
       state.selection = null; rebuild();
@@ -905,12 +945,13 @@ function startReorderClip(ev, id, originalIdx) {
     if (target !== me) {
       const [x] = state.clips.splice(me, 1);
       state.clips.splice(target, 0, x);
-      rebuild();
+      scheduleSoft();
     }
   };
   const onUp = () => {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    rebuild();
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
@@ -923,11 +964,12 @@ function startResizeClip(ev, id) {
   const onMove = (e) => {
     const dx = e.clientX - startX;
     clip.duration = Math.max(0.2, startDur + dx / state.pxPerSec);
-    rebuild();
+    scheduleSoft();
   };
   const onUp = () => {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    rebuild();
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
@@ -941,11 +983,12 @@ function startResizeSubtitle(ev, id, edge) {
     const dt = (e.clientX - startX) / state.pxPerSec;
     if (edge === 'start') sub.start = Math.min(sub.end - 0.1, Math.max(0, s0 + dt));
     else sub.end = Math.max(sub.start + 0.1, e0 + dt);
-    rebuild();
+    scheduleSoft();
   };
   const onUp = () => {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    rebuild();
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
@@ -959,11 +1002,12 @@ function startMoveSubtitle(ev, id) {
     const dt = (e.clientX - startX) / state.pxPerSec;
     sub.start = Math.max(0, s0 + dt);
     sub.end = sub.start + len;
-    rebuild();
+    scheduleSoft();
   };
   const onUp = () => {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    rebuild();
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
@@ -1182,6 +1226,153 @@ document.addEventListener('keydown', (e) => {
     cancelCalibration();
   }
 });
+
+// ---------- Auto calibration (VAD-based) ----------
+$('#btn-auto-calibrate').onclick = autoCalibrate;
+
+async function autoCalibrate() {
+  if (state.subtitles.length === 0) { alert('请先用 📝 粘文案 添加字幕'); return; }
+  if (!state.audio) { alert('请先上传配音音频'); return; }
+
+  $('#export-overlay').classList.remove('hidden');
+  setExportProgress(0.05, '解码音频中...');
+  try {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const resp = await fetch(state.audio.dataUrl);
+    const buf = await resp.arrayBuffer();
+    const audioBuf = await ac.decodeAudioData(buf);
+    ac.close().catch(() => {});
+
+    setExportProgress(0.5, '检测语音段...');
+    await new Promise(r => setTimeout(r, 16)); // let UI repaint
+    let segments = detectSpeechSegments(audioBuf);
+
+    const n = state.subtitles.length;
+    setExportProgress(0.8, `匹配 ${segments.length} 段语音 → ${n} 句字幕...`);
+    await new Promise(r => setTimeout(r, 16));
+
+    if (segments.length === 0) {
+      $('#export-overlay').classList.add('hidden');
+      alert('未检测到清晰的语音段，建议改用 🎯 跟读校准。');
+      return;
+    }
+    if (segments.length > n) segments = mergeShortGaps(segments, n);
+    else if (segments.length < n) segments = subdivideLongSegments(segments, n);
+
+    if (segments.length !== n) {
+      $('#export-overlay').classList.add('hidden');
+      alert(`匹配失败（${segments.length} ≠ ${n}）。建议改用 🎯 跟读校准。`);
+      return;
+    }
+    for (let i = 0; i < n; i++) {
+      state.subtitles[i].start = Math.max(0, segments[i].start - 0.05);
+      state.subtitles[i].end   = segments[i].end + 0.15;
+    }
+    setExportProgress(1, '完成');
+    setTimeout(() => {
+      $('#export-overlay').classList.add('hidden');
+      if (state.clips.length > 0 && confirm('字幕时间已自动对齐音频。是否同步对齐图片翻页时长？')) {
+        alignClipsToSubtitles();
+      }
+      rebuild();
+    }, 300);
+  } catch (err) {
+    $('#export-overlay').classList.add('hidden');
+    alert('自动校准失败：' + (err.message || err));
+  }
+}
+
+function detectSpeechSegments(audioBuf) {
+  // Mix to mono, compute RMS energy per 30ms window, adaptive threshold.
+  const sr = audioBuf.sampleRate;
+  const numCh = audioBuf.numberOfChannels;
+  const len = audioBuf.length;
+  const winMs = 30;
+  const winSize = Math.floor(sr * winMs / 1000);
+  const energies = new Float32Array(Math.ceil(len / winSize));
+  const ch0 = audioBuf.getChannelData(0);
+  const ch1 = numCh > 1 ? audioBuf.getChannelData(1) : null;
+
+  let wi = 0;
+  for (let i = 0; i < len; i += winSize) {
+    let sum = 0;
+    const end = Math.min(i + winSize, len);
+    if (ch1) for (let j = i; j < end; j++) { const s = (ch0[j] + ch1[j]) * 0.5; sum += s * s; }
+    else     for (let j = i; j < end; j++) { const s = ch0[j]; sum += s * s; }
+    energies[wi++] = Math.sqrt(sum / Math.max(1, end - i));
+  }
+
+  // Adaptive threshold from energy distribution.
+  const sorted = Array.from(energies).sort((a, b) => a - b);
+  const noiseFloor = sorted[Math.floor(sorted.length * 0.20)] || 0;
+  const peak = sorted[Math.floor(sorted.length * 0.90)] || 1;
+  const threshold = noiseFloor + Math.max(0.005, (peak - noiseFloor) * 0.18);
+
+  // 3-window majority smoothing.
+  const isVoice = new Uint8Array(energies.length);
+  for (let i = 0; i < energies.length; i++) {
+    const a = energies[Math.max(0, i - 1)] > threshold ? 1 : 0;
+    const b = energies[i] > threshold ? 1 : 0;
+    const c = energies[Math.min(energies.length - 1, i + 1)] > threshold ? 1 : 0;
+    isVoice[i] = (a + b + c) >= 2 ? 1 : 0;
+  }
+
+  const minSilenceWindows = Math.ceil(220 / winMs); // 220ms gap = sentence break
+  const minSpeechWindows  = Math.ceil(180 / winMs); // 180ms min for a real segment
+  const segments = [];
+  let inSpeech = false, segStart = 0, silenceCount = 0;
+  for (let i = 0; i < isVoice.length; i++) {
+    if (isVoice[i]) {
+      if (!inSpeech) { segStart = i; inSpeech = true; }
+      silenceCount = 0;
+    } else if (inSpeech) {
+      silenceCount++;
+      if (silenceCount >= minSilenceWindows) {
+        const segEnd = i - silenceCount;
+        if (segEnd - segStart >= minSpeechWindows) {
+          segments.push({ start: segStart * winMs / 1000, end: segEnd * winMs / 1000 });
+        }
+        inSpeech = false;
+      }
+    }
+  }
+  if (inSpeech) {
+    const segEnd = isVoice.length;
+    if (segEnd - segStart >= minSpeechWindows) {
+      segments.push({ start: segStart * winMs / 1000, end: segEnd * winMs / 1000 });
+    }
+  }
+  return segments;
+}
+
+function mergeShortGaps(segments, target) {
+  const segs = segments.map(s => ({ ...s }));
+  while (segs.length > target) {
+    let bestGap = Infinity, bestIdx = -1;
+    for (let i = 0; i < segs.length - 1; i++) {
+      const gap = segs[i + 1].start - segs[i].end;
+      if (gap < bestGap) { bestGap = gap; bestIdx = i; }
+    }
+    if (bestIdx < 0) break;
+    segs[bestIdx].end = segs[bestIdx + 1].end;
+    segs.splice(bestIdx + 1, 1);
+  }
+  return segs;
+}
+function subdivideLongSegments(segments, target) {
+  // Split the longest segments evenly until we hit target count.
+  const segs = segments.map(s => ({ ...s }));
+  while (segs.length < target) {
+    let longestIdx = 0;
+    for (let i = 1; i < segs.length; i++) {
+      if (segs[i].end - segs[i].start > segs[longestIdx].end - segs[longestIdx].start) longestIdx = i;
+    }
+    const s = segs[longestIdx];
+    const mid = (s.start + s.end) / 2;
+    segs.splice(longestIdx, 1, { start: s.start, end: mid }, { start: mid, end: s.end });
+  }
+  return segs;
+}
 
 // ---------- Init ----------
 window.addEventListener('resize', rebuild);
