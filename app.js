@@ -702,7 +702,6 @@ function renderTimeline() {
     el.style.left = (acc * state.pxPerSec) + 'px';
     el.style.width = (c.duration * state.pxPerSec) + 'px';
     el.dataset.id = c.id;
-    el.onclick = () => { state.selection = { kind: 'clip', id: c.id }; rebuild(); };
     el.onmousedown = (ev) => {
       if (ev.target !== el) return;
       startReorderClip(ev, c.id, i);
@@ -724,7 +723,6 @@ function renderTimeline() {
     el.style.left = (s.start * state.pxPerSec) + 'px';
     el.style.width = Math.max(20, (s.end - s.start) * state.pxPerSec) + 'px';
     el.dataset.id = s.id;
-    el.onclick = () => { state.selection = { kind: 'subtitle', id: s.id }; rebuild(); };
     const left = document.createElement('div');
     left.className = 'handle left';
     left.onmousedown = (ev) => startResizeSubtitle(ev, s.id, 'start');
@@ -922,17 +920,19 @@ function moveClip(id, dir) {
 // ---------- Drag interactions ----------
 function startReorderClip(ev, id, originalIdx) {
   ev.preventDefault();
-  let lastSwap = originalIdx;
   const startX = ev.clientX;
+  let dragging = false;
   const onMove = (e) => {
+    if (!dragging) {
+      if (Math.abs(e.clientX - startX) < 4) return;
+      dragging = true;
+    }
     const dx = e.clientX - startX;
-    // Compute absolute timeline x for this clip's center under drag
     const me = state.clips.findIndex(c => c.id === id);
     if (me < 0) return;
     let myStart = 0;
     for (let i = 0; i < me; i++) myStart += state.clips[i].duration;
     const myCenterPx = (myStart + state.clips[me].duration / 2) * state.pxPerSec + dx;
-    // Find target index by walking clips
     let acc = 0, target = me;
     for (let i = 0; i < state.clips.length; i++) {
       const c = state.clips[i];
@@ -952,6 +952,7 @@ function startReorderClip(ev, id, originalIdx) {
   const onUp = () => {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    if (!dragging) state.selection = { kind: 'clip', id };
     rebuild();
   };
   document.addEventListener('mousemove', onMove);
@@ -999,7 +1000,12 @@ function startMoveSubtitle(ev, id) {
   const sub = state.subtitles.find(s => s.id === id);
   const startX = ev.clientX;
   const s0 = sub.start, e0 = sub.end, len = e0 - s0;
+  let dragging = false;
   const onMove = (e) => {
+    if (!dragging) {
+      if (Math.abs(e.clientX - startX) < 4) return;
+      dragging = true;
+    }
     const dt = (e.clientX - startX) / state.pxPerSec;
     sub.start = Math.max(0, s0 + dt);
     sub.end = sub.start + len;
@@ -1008,6 +1014,7 @@ function startMoveSubtitle(ev, id) {
   const onUp = () => {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    if (!dragging) state.selection = { kind: 'subtitle', id };
     rebuild();
   };
   document.addEventListener('mousemove', onMove);
@@ -1234,11 +1241,6 @@ $('#btn-auto-calibrate').onclick = autoCalibrate;
 async function autoCalibrate() {
   if (state.subtitles.length === 0) { alert('请先用 📝 粘文案 添加字幕'); return; }
   if (!state.audio) { alert('请先上传配音音频'); return; }
-  if (state.subtitles.length === 1) {
-    state.subtitles[0].start = 0;
-    state.subtitles[0].end = state.audio.duration;
-    rebuild(); return;
-  }
 
   $('#export-overlay').classList.remove('hidden');
   setExportProgress(0.1, '解码音频...');
@@ -1345,6 +1347,12 @@ function analyzeAudioForSubtitles(audioBuf, subtitles) {
   }
 
   const n = subtitles.length;
+  if (n === 1) {
+    return {
+      starts: [Math.max(0, firstSpeech - 0.05)],
+      ends: [Math.min(audioBuf.duration, lastSpeech + 0.15)],
+    };
+  }
   if (gaps.length < n - 1) return null;
 
   // Char-proportional ideal boundaries
